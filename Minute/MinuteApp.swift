@@ -6,12 +6,25 @@
 //
 
 import SwiftUI
+import SwiftData
 
 @main
 struct MinuteApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            AppLifecycleManager()
+        }
+        .modelContainer(for: [Segment.self, Session.self, ActivityLabel.self, AppCategoryRule.self, Cluster.self, DomainRule.self, BrowserVisit.self, FocusGroup.self])
+        
+        MenuBarExtra("Minute", systemImage: "clock") {
+            Button("Open Review") {
+                NSApp.activate(ignoringOtherApps: true)
+                // In a real agent app, we'd open the window here manually
+            }
+            Divider()
+            Button("Quit") {
+                NSApplication.shared.terminate(nil)
+            }
         }
     }
 }

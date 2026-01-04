@@ -1,0 +1,126 @@
+#!/usr/bin/env swift
+
+// Native Messaging Host for Minute Browser Extension
+// Receives rich page context from Chrome and writes to a shared file
+
+import Foundation
+
+// Native messaging uses length-prefixed JSON messages
+// Format: 4-byte length (little-endian) + JSON payload
+
+struct TabMessage: Codable {
+    let type: String
+    let domain: String
+    let path: String?
+    let query: String?
+    let title: String
+    let timestamp: Int
+    
+    // Rich context from content script
+    let description: String?
+    let keywords: String?
+    let ogType: String?
+    let ogTitle: String?
+    let ogDescription: String?
+    let ogSiteName: String?
+    let contentSnippet: String?
+    let selectedText: String?
+    let lang: String?
+}
+
+// Shared file path for communication with main app
+// MUST use the sandboxed container path since the app IS sandboxed
+let sharedFilePath = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Containers/com.tychoyoung.Minute/Data/Library/Application Support/Minute/browser_context.json")
+
+// Ensure directory exists
+let appSupportDir = sharedFilePath.deletingLastPathComponent()
+try? FileManager.default.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+
+// Read a message from stdin (Chrome native messaging format)
+func readMessage() -> Data? {
+    // Read 4-byte length prefix
+    var lengthData = Data(count: 4)
+    let bytesRead = lengthData.withUnsafeMutableBytes { ptr in
+        fread(ptr.baseAddress, 1, 4, stdin)
+    }
+    
+    guard bytesRead == 4 else { return nil }
+    
+    let length = lengthData.withUnsafeBytes { ptr in
+        ptr.load(as: UInt32.self)
+    }
+    
+    guard length > 0 && length < 1_000_000 else { return nil }
+    
+    // Read message body
+    var messageData = Data(count: Int(length))
+    let messageBytes = messageData.withUnsafeMutableBytes { ptr in
+        fread(ptr.baseAddress, 1, Int(length), stdin)
+    }
+    
+    guard messageBytes == Int(length) else { return nil }
+    
+    return messageData
+}
+
+// Write a message to stdout (Chrome native messaging format)
+func writeMessage(_ message: [String: Any]) {
+    guard let jsonData = try? JSONSerialization.data(withJSONObject: message) else { return }
+    
+    var length = UInt32(jsonData.count)
+    let lengthData = Data(bytes: &length, count: 4)
+    
+    FileHandle.standardOutput.write(lengthData)
+    FileHandle.standardOutput.write(jsonData)
+}
+
+// Send acknowledgment
+func sendAck() {
+    writeMessage(["status": "ok", "timestamp": Int(Date().timeIntervalSince1970 * 1000)])
+}
+
+// Main loop
+fputs("Minute Native Host v1.1 (rich context) started\n", stderr)
+
+while true {
+    guard let messageData = readMessage() else {
+        fputs("Minute Native Host: No more messages, exiting\n", stderr)
+        break
+    }
+    
+    do {
+        let message = try JSONDecoder().decode(TabMessage.self, from: messageData)
+        
+        // Write rich context to shared file for main app to read
+        var contextData: [String: Any] = [
+            "domain": message.domain,
+            "title": message.title,
+            "timestamp": message.timestamp,
+            "updatedAt": Int(Date().timeIntervalSince1970 * 1000)
+        ]
+        
+        // Add optional rich fields
+        if let path = message.path { contextData["path"] = path }
+        if let query = message.query { contextData["query"] = query }
+        if let description = message.description { contextData["description"] = description }
+        if let keywords = message.keywords { contextData["keywords"] = keywords }
+        if let ogType = message.ogType { contextData["ogType"] = ogType }
+        if let ogTitle = message.ogTitle { contextData["ogTitle"] = ogTitle }
+        if let ogDescription = message.ogDescription { contextData["ogDescription"] = ogDescription }
+        if let ogSiteName = message.ogSiteName { contextData["ogSiteName"] = ogSiteName }
+        if let contentSnippet = message.contentSnippet { contextData["contentSnippet"] = contentSnippet }
+        if let selectedText = message.selectedText { contextData["selectedText"] = selectedText }
+        if let lang = message.lang { contextData["lang"] = lang }
+        
+        let jsonData = try JSONSerialization.data(withJSONObject: contextData, options: .prettyPrinted)
+        try jsonData.write(to: sharedFilePath)
+        
+        let snippetInfo = message.contentSnippet != nil ? " (\(message.contentSnippet!.count) chars)" : ""
+        fputs("Minute Native Host: Wrote context - \(message.domain)\(message.path ?? "")\(snippetInfo)\n", stderr)
+        
+        sendAck()
+    } catch {
+        fputs("Minute Native Host: Error processing message - \(error)\n", stderr)
+    }
+}
