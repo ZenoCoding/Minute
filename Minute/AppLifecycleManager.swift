@@ -10,6 +10,7 @@ import SwiftData
 
 struct AppLifecycleManager: View {
     @Environment(\.modelContext) private var modelContext
+    @StateObject private var calendarManager = CalendarManager()
     @State private var trackerService: TrackerService?
     @State private var selectedTab = 0
     @State private var isInitialized = false
@@ -18,9 +19,9 @@ struct AppLifecycleManager: View {
         Group {
             if let tracker = trackerService {
                 TabView(selection: $selectedTab) {
-                    ReviewView()
+                    OrbitView() // The new "Goals" Dashboard
                         .tabItem {
-                            Label("Today", systemImage: "clock")
+                            Label("Orbit", systemImage: "circle.hexagongrid.fill")
                         }
                         .tag(0)
                     
@@ -36,13 +37,20 @@ struct AppLifecycleManager: View {
                         }
                         .tag(2)
                     
+                    TimerView()
+                        .tabItem {
+                            Label("Timer", systemImage: "timer")
+                        }
+                        .tag(3)
+                    
                     SettingsView()
                         .tabItem {
                             Label("Settings", systemImage: "gearshape")
                         }
-                        .tag(3)
+                        .tag(4)
                 }
                 .environmentObject(tracker)
+                .environmentObject(calendarManager)
             } else {
                 ProgressView("Starting Minute...")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

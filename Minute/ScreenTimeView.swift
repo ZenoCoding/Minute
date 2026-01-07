@@ -80,33 +80,7 @@ struct ScreenTimeView: View {
         }
         .padding(24)
         .frame(maxWidth: .infinity)
-        .background {
-            ZStack {
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(.ultraThinMaterial)
-                
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(
-                        LinearGradient(
-                            colors: [.white.opacity(0.12), .clear, .black.opacity(0.04)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-            }
-        }
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(
-                    LinearGradient(
-                        colors: [.white.opacity(0.25), .white.opacity(0.05)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-        )
-        .shadow(color: .black.opacity(0.08), radius: 12, x: 0, y: 4)
+        .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 16))
     }
     
     // MARK: - Usage Chart (Bar Chart)
@@ -120,33 +94,7 @@ struct ScreenTimeView: View {
                 .frame(height: 120)
         }
         .padding()
-        .background {
-            ZStack {
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(.ultraThinMaterial)
-                
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(
-                        LinearGradient(
-                            colors: [.white.opacity(0.1), .clear, .black.opacity(0.03)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-            }
-        }
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(
-                    LinearGradient(
-                        colors: [.white.opacity(0.2), .white.opacity(0.05)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-        )
-        .shadow(color: .black.opacity(0.06), radius: 8, x: 0, y: 3)
+        .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 16))
     }
     
     // MARK: - App List
@@ -168,33 +116,7 @@ struct ScreenTimeView: View {
             }
         }
         .padding()
-        .background {
-            ZStack {
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(.ultraThinMaterial)
-                
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(
-                        LinearGradient(
-                            colors: [.white.opacity(0.1), .clear, .black.opacity(0.03)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-            }
-        }
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(
-                    LinearGradient(
-                        colors: [.white.opacity(0.2), .white.opacity(0.05)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-        )
-        .shadow(color: .black.opacity(0.06), radius: 8, x: 0, y: 3)
+        .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 16))
     }
     
     var appListView: some View {
@@ -309,11 +231,20 @@ struct ScreenTimeView: View {
             
             // Collect domain usage for browser sessions
             if session.activityType == .browser {
-                for visit in session.browserVisits {
-                    var bundleDomains = domainUsage[session.bundleID] ?? [:]
-                    bundleDomains[visit.domain] = (bundleDomains[visit.domain] ?? 0) + visit.duration
-                    domainUsage[session.bundleID] = bundleDomains
+                var bundleDomains = domainUsage[session.bundleID] ?? [:]
+                
+                // If we have specific visits, use them
+                if !session.browserVisits.isEmpty {
+                    for visit in session.browserVisits {
+                        bundleDomains[visit.domain] = (bundleDomains[visit.domain] ?? 0) + visit.duration
+                    }
+                } 
+                // Fallback: If no visits (or just 1-to-1 mapping), use the session's domain
+                else if let domain = session.browserDomain {
+                    bundleDomains[domain] = (bundleDomains[domain] ?? 0) + session.duration
                 }
+                
+                domainUsage[session.bundleID] = bundleDomains
             }
         }
         
@@ -344,8 +275,12 @@ struct ScreenTimeView: View {
         for session in screenTimeSessions where session.state == .active {
             // For browser sessions, use full domain breakdown
             if session.activityType == .browser {
-                for visit in session.browserVisits {
-                    domainDurations[visit.domain] = (domainDurations[visit.domain] ?? 0) + visit.duration
+                if !session.browserVisits.isEmpty {
+                    for visit in session.browserVisits {
+                        domainDurations[visit.domain] = (domainDurations[visit.domain] ?? 0) + visit.duration
+                    }
+                } else if let domain = session.browserDomain {
+                    domainDurations[domain] = (domainDurations[domain] ?? 0) + session.duration
                 }
             } else {
                 // For non-browser, use app name as "domain"
@@ -445,8 +380,8 @@ struct ScreenTimeView: View {
     
     func debugSessionRow(session: Session) -> some View {
         let isCounted = session.activityType != .meta && !excludedBundleIDs.contains(session.bundleID)
-        let startTime = session.startTimestamp.formatted(date: .omitted, time: .standard)
-        let endTime = (session.endTimestamp ?? Date()).formatted(date: .omitted, time: .standard)
+        let startTime = session.startTimestamp.formatted(date: .omitted, time: .shortened)
+        let endTime = (session.endTimestamp ?? Date()).formatted(date: .omitted, time: .shortened)
         
         return HStack(spacing: 8) {
             Circle()
@@ -631,15 +566,8 @@ struct AppUsageRow: View {
     
     var mainRow: some View {
         HStack(spacing: 12) {
-            // App icon placeholder
-            RoundedRectangle(cornerRadius: 8)
-                .fill(colorForActivityType.gradient)
-                .frame(width: 40, height: 40)
-                .overlay(
-                    Text(String(appName.prefix(1)).uppercased())
-                        .font(.headline.bold())
-                        .foregroundStyle(.white)
-                )
+            // Real App Icon
+            AppIconView(bundleID: bundleID, size: 40)
             
             VStack(alignment: .leading, spacing: 6) {
                 HStack {

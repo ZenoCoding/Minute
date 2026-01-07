@@ -32,6 +32,7 @@ class TrackerService: ObservableObject {
     @Published var currentSession: Session?
     @Published var pendingSegment: PendingSegment?
     @Published var showMetaSessions: Bool = false  // Toggle to show/hide meta sessions
+    @Published var activeTask: TaskItem? // The user's declared intent
     
     // Recent history for merge detection
     private var recentSessions: [(bundleID: String, endTime: Date, session: Session)] = []
@@ -61,6 +62,43 @@ class TrackerService: ObservableObject {
     
     func startTracking() {
         print("TrackerService: Started")
+        handleAppChange()
+    }
+    
+    // MARK: - Task Control
+    
+    func startTask(_ task: TaskItem) {
+        guard activeTask?.id != task.id else { return }
+        print("TrackerService: Switching focus to task '\(task.title)'")
+        
+        // 1. Close current session (so we can start a new one linked to this task)
+        // If we just attach the CURRENT session to the new task, we might retrospectively re-label
+        // work that wasn't actually for this task.
+        // SAFE APPROACH: Close current session, start new one (even if same app).
+        
+        // Preserve current app state
+        let currentApp = currentSession?.bundleID
+        let currentVisit = currentBrowserVisit
+        
+        closeCurrentSession()
+        
+        // 2. Set Active Task
+        activeTask = task
+        
+        // 3. Re-trigger app change to start new session
+        // If we were in an app, this will create a new session for it immediately.
+        // We need to ensure handleAppChange picks up the new activeTask.
+        // Since activeTask is set, the NEXT session created by commitPendingSegment will pick it up.
+        
+        handleAppChange()
+    }
+    
+    func stopCurrentTask() {
+        guard activeTask != nil else { return }
+        print("TrackerService: Stopping active task")
+        
+        closeCurrentSession()
+        activeTask = nil
         handleAppChange()
     }
     
@@ -180,8 +218,8 @@ class TrackerService: ObservableObject {
     private var currentBrowserVisit: BrowserVisit?
     
     private func handleDomainChange(from oldDomain: String, to newDomain: String, title: String?) {
-        // Only care if we're in a browser session
-        guard let session = currentSession, session.activityType == .browser else { return }
+        // We received a domain change from the extension, so this IS a browser session
+        guard let session = currentSession else { return }
         
         // Close the previous visit
         if let visit = currentBrowserVisit {
@@ -208,6 +246,11 @@ class TrackerService: ObservableObject {
             activityType: .browser,
             confidence: 1.0
         )
+        
+        // Link to active task if present
+        if let task = activeTask {
+            newSession.task = task
+        }
         
         newSession.browserDomain = newDomain
         newSession.browserTitle = title
@@ -237,6 +280,8 @@ class TrackerService: ObservableObject {
         Task { @MainActor in
             await focusGroupService.classifySession(newSession, modelContext: modelContext)
         }
+        
+        try? modelContext.save()
     }
     
     // MARK: - App Changes
@@ -325,6 +370,11 @@ class TrackerService: ObservableObject {
             confidence: confidence,
             unknownReason: reason
         )
+        
+        // Link to active task if present
+        if let task = activeTask {
+            session.task = task
+        }
         
         // Capture browser context if this is a browser session
         if activityType == .browser {

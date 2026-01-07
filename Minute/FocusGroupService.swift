@@ -20,9 +20,8 @@ class FocusGroupService: ObservableObject {
     @Published private(set) var isProcessing = false
     @Published private(set) var lastError: String?
     
-    // Cache of today's focus groups for quick lookup
-    private var todayGroups: [FocusGroup] = []
-    private var todayDate: Date = Date()
+    // Dependencies
+    private let goalService = GoalService()
     
     init() {
         self.apiKey = UserDefaults.standard.string(forKey: "GeminiAPIKey") ?? ""
@@ -30,85 +29,55 @@ class FocusGroupService: ObservableObject {
     
     var hasAPIKey: Bool { !apiKey.isEmpty }
     
-    /// Classify a session and assign to a focus group
+    /// Classify a session and assign to a project or focus group
     func classifySession(_ session: Session, modelContext: ModelContext) async {
-        guard hasAPIKey else {
-            print("FocusGroupService: No API key configured")
-            return
-        }
+        guard hasAPIKey else { return }
         
         // Skip if already assigned
-        guard session.focusGroup == nil else { return }
-        
-        // Refresh today's groups if needed
-        await refreshTodayGroups(modelContext: modelContext)
+        guard session.project == nil && session.focusGroup == nil else { return }
         
         isProcessing = true
         defer { isProcessing = false }
         
         do {
+            // Get active projects for context
+            let activeProjects = goalService.getActiveProjects(modelContext: modelContext)
+            
             // Build context for AI
             let context = buildSessionContext(session)
             
             // Call AI for classification
-            let result = try await callAI(sessionContext: context, existingGroups: todayGroups)
-            
-            print("FocusGroupService: AI result - task: \(result.taskName), existing: \(result.existingGroupIndex ?? -1), distraction: \(result.isDistraction)")
+            let result = try await callAI(sessionContext: context, projects: activeProjects)
             
             // Apply result
-            if let existingIndex = result.existingGroupIndex, existingIndex < todayGroups.count {
-                // Assign to existing group
-                let group = todayGroups[existingIndex]
-                session.focusGroup = group
+            if let projectIndex = result.projectIndex, projectIndex < activeProjects.count {
+                // Matches an active project
+                let project = activeProjects[projectIndex]
+                session.project = project
                 session.isGroupDistraction = result.isDistraction
-                group.lastActiveAt = Date()
-                group.sessions.append(session)
+                session.inferredTask = result.taskName
             } else {
-                // Create new group
-                let newGroup = FocusGroup(name: result.taskName)
+                // Creates a new "Focus Group" (Fallback / Unsorted)
+                // For now, we still create a FocusGroup for items that don't match a project
+                let newGroup = FocusGroup(name: result.taskName, icon: result.icon)
                 modelContext.insert(newGroup)
                 session.focusGroup = newGroup
                 session.isGroupDistraction = result.isDistraction
-                newGroup.sessions.append(session)
-                todayGroups.append(newGroup)
             }
             
             try? modelContext.save()
             
         } catch {
             lastError = error.localizedDescription
-            print("FocusGroupService: Error - \(error)")
-        }
-    }
-    
-    /// Refresh cache of today's groups
-    private func refreshTodayGroups(modelContext: ModelContext) async {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        
-        // Only refresh if date changed or cache is empty
-        if calendar.isDate(todayDate, inSameDayAs: today) && !todayGroups.isEmpty {
-            return
-        }
-        
-        todayDate = today
-        
-        let descriptor = FetchDescriptor<FocusGroup>(
-            predicate: #Predicate { $0.date >= today },
-            sortBy: [SortDescriptor(\.lastActiveAt, order: .reverse)]
-        )
-        
-        do {
-            todayGroups = try modelContext.fetch(descriptor)
-        } catch {
-            print("FocusGroupService: Failed to fetch groups - \(error)")
-            todayGroups = []
+            // print("FocusGroupService: Error - \(error)")
         }
     }
     
     /// Build context string for AI classification
     private func buildSessionContext(_ session: Session) -> String {
-        var context = "App: \(session.appName)"
+        // Obscure browser app names to prevent bias (e.g. Dia -> Diagramming)
+        let appName = session.activityType == .browser ? "Web Browser" : session.appName
+        var context = "App: \(appName)"
         
         if let domain = session.browserDomain {
             context += "\nDomain: \(domain)"
@@ -116,6 +85,12 @@ class FocusGroupService: ObservableObject {
         
         if let title = session.browserTitle {
             context += "\nTitle: \(title)"
+        }
+        
+        // Add Category hint (helps disambiguate misleading app names)
+        // e.g. "Antigravity" (Category: Focused Work) -> Coding
+        if session.activityType != .unknown && session.activityType != .meta {
+            context += "\nCategory: \(session.activityType.rawValue)"
         }
         
         // Include rich context from browser visits
@@ -136,31 +111,31 @@ class FocusGroupService: ObservableObject {
     }
     
     /// Call Gemini API for classification
-    private func callAI(sessionContext: String, existingGroups: [FocusGroup]) async throws -> ClassificationResult {
-        // Build group list for prompt
-        var groupList = "None"
-        if !existingGroups.isEmpty {
-            groupList = existingGroups.enumerated().map { index, group in
-                let ago = Int(Date().timeIntervalSince(group.lastActiveAt) / 60)
-                return "\(index). \"\(group.name)\""
+    private func callAI(sessionContext: String, projects: [Project]) async throws -> ClassificationResult {
+        // Build project list for prompt
+        var projectList = "None"
+        if !projects.isEmpty {
+            projectList = projects.enumerated().map { index, proj in
+                return "\(index). \"\(proj.name)\" (Area: \(proj.area?.name ?? "General"))"
             }.joined(separator: ", ")
         }
         
         let prompt = """
-        Classify this computer activity into a task/focus group.
+        Classify this computer activity into one of the user's active projects.
         
-        Existing groups today: \(groupList)
+        Active Projects: \(projectList)
         
         Current activity:
         \(sessionContext)
         
-        Reply with JSON: {"task":"Task Name","existingGroup":null,"isDistraction":false}
+        Reply with JSON: {"task":"Task Name","icon":"sf.symbol","projectIndex":null,"isDistraction":false}
         
         Rules:
-        - "task": Describe WHAT the user is doing (e.g., "Physics Homework", "iOS Development", "Email"), NOT the app name
-        - "existingGroup": index number if this matches an existing group, null if it's a new task
-        - "isDistraction": true ONLY for entertainment (YouTube, Reddit, Twitter, TikTok, games)
-        - For browsers, use the website content/domain to determine the task, not the browser name
+        - "projectIndex": The index of the matching Active Project. If it clearly belongs to one, use its index. If it does not match ANY project, return null.
+        - "task": Describe the specific action (e.g. "Debugging", "Writing Report"). If matched to a project, describe the sub-task.
+        - "icon": An SF Symbol name (e.g. "hammer.fill", "doc.text")
+        - "isDistraction": true ONLY for entertainment/social media not related to the project.
+        - IF "Category" is "Focused Work" or "Coding", favor Development/Productivity tasks.
         """
         
         let url = URL(string: "\(baseURL)?key=\(apiKey)")!
@@ -196,7 +171,7 @@ class FocusGroupService: ObservableObject {
             throw ClassificationError.parseError
         }
         
-        print("FocusGroupService: Raw AI response: \(text)")
+        // print("FocusGroupService: Raw AI response: \(text)")
         
         // Extract JSON from response
         var jsonString = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -228,30 +203,110 @@ class FocusGroupService: ObservableObject {
             }
         }
         
-        print("FocusGroupService: Extracted JSON: \(jsonString)")
+        // print("FocusGroupService: Extracted JSON: \(jsonString)")
         
         guard let jsonData = jsonString.data(using: .utf8),
               let result = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
               let taskName = result["task"] as? String else {
-            print("FocusGroupService: Failed to parse JSON")
+            // print("FocusGroupService: Failed to parse JSON")
             throw ClassificationError.parseError
         }
         
-        let existingIndex = result["existingGroup"] as? Int
+        let projectIndex = result["projectIndex"] as? Int
         let isDistraction = result["isDistraction"] as? Bool ?? false
+        let icon = result["icon"] as? String
         
         return ClassificationResult(
             taskName: taskName,
-            existingGroupIndex: existingIndex,
+            icon: icon,
+            projectIndex: projectIndex,
             isDistraction: isDistraction
         )
+    }
+    
+    /// Predict the best project for a given user-entered task description
+    func predictProject(task: String, projects: [Project]) async throws -> Project? {
+        // Build project list for prompt
+        var projectList = "None"
+        if !projects.isEmpty {
+            projectList = projects.enumerated().map { index, proj in
+                return "\(index). \"\(proj.name)\" (Area: \(proj.area?.name ?? "General"))"
+            }.joined(separator: ", ")
+        }
+        
+        let prompt = """
+        Match this new task to one of the user's active projects.
+        
+        Active Projects: \(projectList)
+        
+        New Task Description:
+        "\(task)"
+        
+        Reply with JSON: {"projectIndex": int or null}
+        
+        Rules:
+        - Return the index of the single best matching project.
+        - If it's ambiguous or doesn't match any, return null.
+        """
+        
+        let url = URL(string: "\(baseURL)?key=\(apiKey)")!
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let body: [String: Any] = [
+            "contents": [["parts": [["text": prompt]]]],
+            "generationConfig": [
+                "temperature": 0.1, // Low temperature for deterministic matching
+                "maxOutputTokens": 100
+            ]
+        ]
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw ClassificationError.apiError
+        }
+        
+        // Parse Gemini response
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let candidates = json["candidates"] as? [[String: Any]],
+              let firstCandidate = candidates.first,
+              let content = firstCandidate["content"] as? [String: Any],
+              let parts = content["parts"] as? [[String: Any]],
+              let firstPart = parts.first,
+              let text = firstPart["text"] as? String else {
+            throw ClassificationError.parseError
+        }
+        
+        // Extract JSON
+        var jsonString = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if jsonString.contains("```") {
+            jsonString = jsonString.components(separatedBy: "```").dropFirst().first?.components(separatedBy: "```").first ?? jsonString
+            jsonString = jsonString.replacingOccurrences(of: "json", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        
+        guard let jsonData = jsonString.data(using: .utf8),
+              let result = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+            return nil
+        }
+        
+        if let idx = result["projectIndex"] as? Int, idx >= 0 && idx < projects.count {
+            return projects[idx]
+        }
+        
+        return nil
     }
     
     // MARK: - Types
     
     struct ClassificationResult {
         let taskName: String
-        let existingGroupIndex: Int?
+        let icon: String?
+        let projectIndex: Int?
         let isDistraction: Bool
     }
     

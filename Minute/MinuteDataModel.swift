@@ -136,6 +136,7 @@ final class Segment {
 final class FocusGroup {
     var id: UUID = UUID()
     var name: String                     // "Physics Study", "Vibe Coding"
+    var icon: String?                    // SF Symbol name (e.g. "studentdesk", "laptopcomputer")
     var date: Date                       // Day this group belongs to
     var createdAt: Date
     var lastActiveAt: Date
@@ -144,8 +145,9 @@ final class FocusGroup {
     @Relationship(deleteRule: .nullify, inverse: \Session.focusGroup)
     var sessions: [Session] = []
     
-    init(name: String, date: Date = Date()) {
+    init(name: String, icon: String? = nil, date: Date = Date()) {
         self.name = name
+        self.icon = icon
         self.date = Calendar.current.startOfDay(for: date)
         self.createdAt = Date()
         self.lastActiveAt = Date()
@@ -163,6 +165,96 @@ final class FocusGroup {
     
     /// Session count
     var sessionCount: Int { sessions.count }
+}
+
+// MARK: - Goals & Tasks System
+
+enum ProjectStatus: String, Codable {
+    case active
+    case backlog
+    case completed
+    case archived
+}
+
+@Model class Area {
+    var id: UUID = UUID()
+    var name: String
+    var themeColor: String // Hex string
+    var iconName: String   // SF Symbol
+    var orderIndex: Int = 0
+    var createdAt: Date
+    
+    @Relationship(deleteRule: .cascade, inverse: \Project.area)
+    var projects: [Project] = []
+    
+    init(name: String, themeColor: String = "007AFF", iconName: String = "folder", orderIndex: Int = 0, createdAt: Date = Date()) {
+        self.name = name
+        self.themeColor = themeColor
+        self.iconName = iconName
+        self.orderIndex = orderIndex
+        self.createdAt = createdAt
+    }
+}
+
+@Model class Project {
+    var id: UUID = UUID()
+    var name: String
+    var status: ProjectStatus
+    var weeklyGoalSeconds: TimeInterval?
+    var orderIndex: Int = 0
+    var createdAt: Date
+    
+    // Relationships
+    var area: Area?
+    
+    @Relationship(deleteRule: .cascade, inverse: \TaskItem.project)
+    var tasks: [TaskItem] = []
+    
+    @Relationship(deleteRule: .nullify, inverse: \Session.project)
+    var sessions: [Session] = []
+    
+    init(name: String, status: ProjectStatus = .active, weeklyGoalSeconds: TimeInterval? = nil, orderIndex: Int = 0, area: Area? = nil) {
+        self.name = name
+        self.status = status
+        self.weeklyGoalSeconds = weeklyGoalSeconds
+        self.orderIndex = orderIndex
+        self.area = area
+        self.createdAt = Date()
+    }
+}
+
+@Model class TaskItem {
+    var id: UUID = UUID()
+    var title: String
+    var isCompleted: Bool
+    var completedAt: Date?
+    var orderIndex: Int = 0
+    var createdAt: Date
+    
+    var project: Project?
+    
+    // Metadata
+    var estimatedDuration: TimeInterval?
+    var dueDate: Date?
+    
+    // Tracking
+    @Relationship(deleteRule: .nullify)
+    var sessions: [Session] = []
+    
+    var timeSpent: TimeInterval {
+        sessions.reduce(0) { $0 + $1.duration }
+    }
+
+    
+    init(title: String, orderIndex: Int = 0, project: Project? = nil, estimatedDuration: TimeInterval? = nil, dueDate: Date? = nil) {
+        self.title = title
+        self.isCompleted = false
+        self.orderIndex = orderIndex
+        self.createdAt = Date()
+        self.project = project
+        self.estimatedDuration = estimatedDuration
+        self.dueDate = dueDate
+    }
 }
 
 // MARK: - Session (Merged block for UI)
@@ -199,7 +291,13 @@ final class Session {
     
     // Focus Group (AI-managed)
     var focusGroup: FocusGroup?         // Parent focus group
+    var project: Project?               // Link to intentional goal
     var isGroupDistraction: Bool = false // Marked as distraction within group
+    
+    // Task Link (Direct Tracking)
+    @Relationship(deleteRule: .nullify, inverse: \TaskItem.sessions)
+    var task: TaskItem?
+
     
     // Child segments
     @Relationship(deleteRule: .cascade) var segments: [Segment] = []

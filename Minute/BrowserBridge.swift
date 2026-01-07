@@ -98,42 +98,48 @@ class BrowserBridge: ObservableObject {
     }
     
     private func readContextFile() {
-        guard let data = try? Data(contentsOf: contextFilePath),
-              let context = try? JSONDecoder().decode(BrowserContext.self, from: data) else {
-            return
-        }
+//        print("BrowserBridge: Checking context file at \(contextFilePath.path)")
         
-        let updateTime = Date(timeIntervalSince1970: Double(context.updatedAt) / 1000)
-        
-        // Only update if this is recent (within last 30 seconds)
-        guard Date().timeIntervalSince(updateTime) < 30 else {
-            isConnected = false
-            return
-        }
-        
-        // Check if domain changed
-        let previousDomain = currentDomain
-        let domainChanged = previousDomain != nil && previousDomain != context.domain
-        
-        currentDomain = context.domain
-        currentTitle = context.title
-        lastUpdate = updateTime
-        isConnected = true
-        
-        // Notify and log only if domain changed
-        if domainChanged {
-            onDomainChange?(previousDomain!, context.domain, context.title)
-            print("BrowserBridge: Domain changed \(previousDomain!) -> \(context.domain)")
-        } else if previousDomain == nil {
-            print("BrowserBridge: Initial context - \(context.domain)")
-        }
-        
-        // Store full context for rich access
-        currentRichContext = context
-        
-        // Log rich context for debugging
-        if let snippet = context.contentSnippet, !snippet.isEmpty {
-            print("BrowserBridge: Rich context - path:\(context.path ?? "/"), snippet:\(snippet.prefix(60))...")
+        do {
+            let data = try Data(contentsOf: contextFilePath)
+            let context = try JSONDecoder().decode(BrowserContext.self, from: data)
+            
+            let updateTime = Date(timeIntervalSince1970: Double(context.updatedAt) / 1000)
+            
+            // Only update if this is recent (within last 30 seconds)
+            guard Date().timeIntervalSince(updateTime) < 30 else {
+                isConnected = false
+//                print("BrowserBridge: Context stale (updated \(Int(Date().timeIntervalSince(updateTime)))s ago)")
+                return
+            }
+            
+            // Check if domain changed
+            let previousDomain = currentDomain
+            let domainChanged = previousDomain != nil && previousDomain != context.domain
+            
+            currentDomain = context.domain
+            currentTitle = context.title
+            lastUpdate = updateTime
+            isConnected = true
+            
+            // Notify and log only if domain changed
+            if domainChanged {
+                onDomainChange?(previousDomain!, context.domain, context.title)
+                print("BrowserBridge: Domain changed \(previousDomain!) -> \(context.domain)")
+            } else if previousDomain == nil {
+                print("BrowserBridge: Initial context - \(context.domain)")
+            }
+            
+            // Store full context for rich access
+            currentRichContext = context
+            
+            // Log rich context for debugging
+            if let snippet = context.contentSnippet, !snippet.isEmpty {
+//                print("BrowserBridge: Rich context - snippet: \(snippet.prefix(60))...")
+            }
+            
+        } catch {
+            print("BrowserBridge: Failed to read context - \(error)")
         }
     }
     

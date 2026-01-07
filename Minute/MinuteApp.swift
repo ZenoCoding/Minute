@@ -14,7 +14,7 @@ struct MinuteApp: App {
         WindowGroup {
             AppLifecycleManager()
         }
-        .modelContainer(for: [Segment.self, Session.self, ActivityLabel.self, AppCategoryRule.self, Cluster.self, DomainRule.self, BrowserVisit.self, FocusGroup.self])
+        .modelContainer(for: [Segment.self, Session.self, ActivityLabel.self, AppCategoryRule.self, Cluster.self, DomainRule.self, BrowserVisit.self, FocusGroup.self, Area.self, Project.self, TaskItem.self])
         
         MenuBarExtra("Minute", systemImage: "clock") {
             Button("Open Review") {

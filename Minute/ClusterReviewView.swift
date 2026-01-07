@@ -300,8 +300,7 @@ struct ClusterRow: View {
                     .foregroundStyle(.tertiary)
             }
             .padding()
-            .background(.background)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
     }
@@ -489,7 +488,7 @@ struct FocusGroupRow: View {
                 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
-                        Image(systemName: "sparkles")
+                        Image(systemName: group.icon ?? "sparkles")
                             .foregroundStyle(.blue)
                             .font(.caption)
                         Text(group.name)
@@ -544,8 +543,7 @@ struct FocusGroupRow: View {
             }
         }
         .padding()
-        .background(.background)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 12))
     }
     
     func formatDuration(_ seconds: TimeInterval) -> String {

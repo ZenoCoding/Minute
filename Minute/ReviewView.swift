@@ -714,7 +714,7 @@ struct SessionRow: View {
             mainRow
             
             // Show browser visits for browser sessions
-            if session.activityType == .browser && !session.browserVisits.isEmpty {
+            if session.activityType == .browser && (!session.browserVisits.isEmpty || session.browserDomain != nil) {
                 browserVisitsSection
             }
         }
@@ -758,19 +758,21 @@ struct SessionRow: View {
     
     var mainRow: some View {
         HStack(spacing: 12) {
-            Circle()
-                .fill(confidenceColor)
-                .frame(width: 10, height: 10)
+            // App Icon
+            AppIconView(bundleID: session.bundleID, size: 28)
             
-            VStack(alignment: .trailing) {
-                Text(session.startTimestamp, format: .dateTime.hour().minute().second())
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session.startTimestamp, format: .dateTime.hour().minute())
                     .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                
                 Text(formatDuration(session.duration))
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.tertiary)
             }
-            .frame(width: 75, alignment: .trailing)
+            .frame(width: 60, alignment: .leading)
             
+            // Activity Color Bar
             RoundedRectangle(cornerRadius: 2)
                 .fill(colorForActivityType(session.activityType))
                 .frame(width: 4)
@@ -853,36 +855,45 @@ struct SessionRow: View {
                 .padding(.horizontal, 12)
             
             VStack(spacing: 4) {
-                ForEach(session.browserVisits.sorted { $0.startTimestamp < $1.startTimestamp }, id: \.id) { visit in
-                    HStack(spacing: 8) {
-                        // Favicon from Google's service
-                        AsyncImage(url: URL(string: "https://www.google.com/s2/favicons?domain=\(visit.domain)&sz=32")) { image in
-                            image
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                        } placeholder: {
-                            Circle()
-                                .fill(visit.isDistraction ? .red.opacity(0.6) : .gray.opacity(0.4))
-                        }
-                        .frame(width: 14, height: 14)
-                        
-                        Text(visit.domain)
-                            .font(.caption)
-                            .foregroundStyle(visit.isDistraction ? .red : .secondary)
-                        
-                        Spacer()
-                        
-                        Text(formatDuration(visit.duration))
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.tertiary)
+                if !session.browserVisits.isEmpty {
+                    ForEach(session.browserVisits.sorted { $0.startTimestamp < $1.startTimestamp }, id: \.id) { visit in
+                        visitRow(domain: visit.domain, duration: visit.duration, isDistraction: visit.isDistraction)
                     }
-                    .padding(.horizontal, 40)
-                    .padding(.vertical, 2)
+                } else if let domain = session.browserDomain {
+                    // Fallback to session domain
+                    visitRow(domain: domain, duration: session.duration, isDistraction: DistractionRules.isDistraction(domain: domain))
                 }
             }
             .padding(.vertical, 6)
         }
         .background(.background.opacity(0.5))
+    }
+    
+    func visitRow(domain: String, duration: TimeInterval, isDistraction: Bool) -> some View {
+        HStack(spacing: 8) {
+            // Favicon from Google's service
+            AsyncImage(url: URL(string: "https://www.google.com/s2/favicons?domain=\(domain)&sz=32")) { image in
+                image
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } placeholder: {
+                Circle()
+                    .fill(isDistraction ? .red.opacity(0.6) : .gray.opacity(0.4))
+            }
+            .frame(width: 14, height: 14)
+            
+            Text(domain)
+                .font(.caption)
+                .foregroundStyle(isDistraction ? .red : .secondary)
+            
+            Spacer()
+            
+            Text(formatDuration(duration))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 40)
+        .padding(.vertical, 2)
     }
     
     var confidenceColor: Color {

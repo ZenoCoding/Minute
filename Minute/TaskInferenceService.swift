@@ -71,7 +71,7 @@ class TaskInferenceService: ObservableObject {
                 try? modelContext.save()
             } catch {
                 lastError = error.localizedDescription
-                print("TaskInference: Error - \(error)")
+                // print("TaskInference: Error - \(error)")
             }
         }
         
@@ -187,7 +187,7 @@ class TaskInferenceService: ObservableObject {
     
     /// Parse task labels from Gemini response
     private func parseLabels(from response: String, expectedCount: Int) throws -> [String] {
-        print("TaskInference: Raw response: \(response)")
+        // print("TaskInference: Raw response: \(response)")
         
         // Extract JSON array from response
         var jsonString = response.trimmingCharacters(in: .whitespacesAndNewlines)

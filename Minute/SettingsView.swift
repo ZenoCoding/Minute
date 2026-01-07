@@ -81,8 +81,7 @@ struct SettingsView: View {
                     }
                 }
                 .padding()
-                .background(.background)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 8))
                 
                 // Clear All
                 HStack {
@@ -111,8 +110,7 @@ struct SettingsView: View {
                     }
                 }
                 .padding()
-                .background(.background)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 8))
             }
             
             if let message = clearMessage {
@@ -137,8 +135,7 @@ struct SettingsView: View {
                 statRow("Storage Size", value: storageSize)
             }
             .padding()
-            .background(.background)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 8))
         }
     }
     
@@ -186,8 +183,7 @@ struct SettingsView: View {
                 statRow("Build", value: Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—")
             }
             .padding()
-            .background(.background)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 8))
         }
     }
     

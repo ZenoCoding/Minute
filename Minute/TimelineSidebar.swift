@@ -59,34 +59,8 @@ struct TimelineSidebar: View {
             bottomLegend
         }
         .frame(width: 100)
-        .background {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.ultraThinMaterial)
-                
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(
-                        LinearGradient(
-                            colors: [.white.opacity(0.08), .clear, .black.opacity(0.02)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-            }
-        }
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(
-                    LinearGradient(
-                        colors: [.white.opacity(0.2), .white.opacity(0.05)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-        )
-        .shadow(color: .black.opacity(0.1), radius: 12, x: 0, y: 4)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .frame(width: 100)
+        .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 10))
         .onReceive(timer) { _ in
             if isNowFollowing {
                 focusCenter = Date()
