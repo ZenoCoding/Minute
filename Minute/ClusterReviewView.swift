@@ -2,7 +2,7 @@
 //  ClusterReviewView.swift
 //  Minute
 //
-//  Focus Threads - shows AI-managed focus groups and session clusters
+//  Focus Threads - shows Task-based threads and unassigned session clusters
 //
 
 import SwiftUI
@@ -11,12 +11,9 @@ import SwiftData
 struct ClusterReviewView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Session.startTimestamp, order: .reverse) private var allSessions: [Session]
-    @Query(sort: \FocusGroup.lastActiveAt, order: .reverse) private var allFocusGroups: [FocusGroup]
     
     @State private var clusters: [ClusterResult] = []
     @State private var selectedCluster: ClusterResult?
-    @State private var selectedFocusGroup: FocusGroup?
-    @State private var customLabel: String = ""
     
     // AI Inference
     @StateObject private var inferenceService = TaskInferenceService()
@@ -30,24 +27,65 @@ struct ClusterReviewView: View {
         return allSessions.filter { calendar.isDateInToday($0.startTimestamp) }
     }
     
-    var todayFocusGroups: [FocusGroup] {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        return allFocusGroups.filter { $0.date >= today }
+    // 1. Sessions linked to a task
+    var taskThreads: [(task: TaskItem, sessions: [Session], duration: TimeInterval)] {
+        let linkedSessions = todaySessions.filter { $0.task != nil }
+        let grouped = Dictionary(grouping: linkedSessions) { $0.task! }
+        
+        return grouped.map { task, sessions in
+            let duration = sessions.reduce(0) { $0 + $1.duration }
+            return (task, sessions.sorted { $0.startTimestamp < $1.startTimestamp }, duration)
+        }.sorted { $0.duration > $1.duration }
+    }
+    
+    // 2. Unassigned sessions (for clustering)
+    var unassignedSessions: [Session] {
+        todaySessions.filter { $0.task == nil }
     }
     
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 32) {
                 header
                 
-                // Show AI Focus Groups if they exist
-                if !todayFocusGroups.isEmpty {
-                    focusGroupList
-                } else if clusters.isEmpty {
+                // Section 1: Task Threads (Intentional Work)
+                if !taskThreads.isEmpty {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Tracked Tasks")
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+                        
+                        ForEach(taskThreads, id: \.task.id) { thread in
+                            TaskThreadRow(task: thread.task, sessions: thread.sessions, totalDuration: thread.duration)
+                        }
+                    }
+                }
+                
+                // Section 2: Unassigned / Free Flowing
+                if !clusters.isEmpty {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack {
+                            Text("Unassigned Flow")
+                                .font(.headline)
+                                .foregroundStyle(.secondary)
+                            
+                            Spacer()
+                            
+                            if !unassignedSessions.isEmpty {
+                                Text("\(formatDuration(unassignedSessions.reduce(0){$0+$1.duration})) total")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        
+                        ForEach(clusters) { cluster in
+                            ClusterRow(cluster: cluster) {
+                                selectedCluster = cluster
+                            }
+                        }
+                    }
+                } else if unassignedSessions.isEmpty && taskThreads.isEmpty {
                     emptyState
-                } else {
-                    clusterList
                 }
             }
             .padding(24)
@@ -57,10 +95,17 @@ struct ClusterReviewView: View {
         .onAppear {
             refreshClusters()
         }
+        // Refresh when sessions change
+        .onChange(of: unassignedSessions.count) { _, _ in
+            refreshClusters()
+        }
         .sheet(item: $selectedCluster) { cluster in
             ClusterDetailSheet(cluster: cluster, onLabel: { label in
                 applyLabel(label, to: cluster)
             })
+        }
+        .sheet(isPresented: $showingAPIKeySheet) {
+            apiKeySheet
         }
     }
     
@@ -78,7 +123,7 @@ struct ClusterReviewView: View {
                 Button {
                     if inferenceService.hasAPIKey {
                         Task {
-                            await inferenceService.inferTaskLabels(for: todaySessions, modelContext: modelContext)
+                            await inferenceService.inferTaskLabels(for: unassignedSessions, modelContext: modelContext)
                             refreshClusters()
                         }
                     } else {
@@ -92,12 +137,12 @@ struct ClusterReviewView: View {
                         } else {
                             Image(systemName: "wand.and.stars")
                         }
-                        Text("AI Label")
+                        Text("AI Group")
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(inferenceService.isProcessing)
-                .help("Use AI to automatically label tasks")
+                .disabled(inferenceService.isProcessing || unassignedSessions.isEmpty)
+                .help("Use AI to group unassigned sessions")
                 
                 Button {
                     refreshClusters()
@@ -106,7 +151,7 @@ struct ClusterReviewView: View {
                 }
                 .buttonStyle(.bordered)
                 
-                // Settings gear for API key
+                // Settings gear
                 Button {
                     showingAPIKeySheet = true
                 } label: {
@@ -115,19 +160,8 @@ struct ClusterReviewView: View {
                 .buttonStyle(.plain)
             }
             
-            HStack {
-                Text("Your focus periods, broken by distractions")
-                    .foregroundStyle(.secondary)
-                
-                if let error = inferenceService.lastError {
-                    Text("• \(error)")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
-            }
-        }
-        .sheet(isPresented: $showingAPIKeySheet) {
-            apiKeySheet
+            Text("Your day, grouped by task contexts.")
+                .foregroundStyle(.secondary)
         }
     }
     
@@ -135,33 +169,20 @@ struct ClusterReviewView: View {
         VStack(spacing: 20) {
             Text("Gemini API Key")
                 .font(.headline)
-            
             Text("Enter your Gemini API key for AI-powered task labeling")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            
             SecureField("API Key", text: $apiKeyInput)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 300)
-            
             HStack {
-                Button("Cancel") {
-                    showingAPIKeySheet = false
-                }
-                .keyboardShortcut(.escape)
-                
+                Button("Cancel") { showingAPIKeySheet = false }
                 Button("Save") {
                     inferenceService.setAPIKey(apiKeyInput)
                     showingAPIKeySheet = false
                 }
-                .keyboardShortcut(.return)
                 .buttonStyle(.borderedProminent)
             }
-            
-            Link("Get API Key from Google AI Studio", 
-                 destination: URL(string: "https://aistudio.google.com/apikey")!)
-                .font(.caption)
         }
         .padding(30)
         .onAppear {
@@ -169,72 +190,145 @@ struct ClusterReviewView: View {
         }
     }
     
-    // MARK: - Empty State
-    
     var emptyState: some View {
         VStack(spacing: 16) {
             Image(systemName: "tray")
                 .font(.system(size: 48))
                 .foregroundStyle(.tertiary)
-            
-            Text("No focus groups yet")
+            Text("No activity yet")
                 .font(.headline)
-            
-            Text("AI will create focus groups as you use your computer")
+            Text("Start working to see your focus threads appear here.")
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 60)
     }
     
-    // MARK: - Focus Group List (AI-managed)
-    
-    var focusGroupList: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Today's Focus")
-                .font(.headline)
-                .foregroundStyle(.secondary)
-            
-            ForEach(todayFocusGroups) { group in
-                FocusGroupRow(group: group)
-            }
-        }
-    }
-    
-    // MARK: - Cluster List
-    
-    var clusterList: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Today's Focus Threads")
-                .font(.headline)
-            
-            ForEach(clusters) { cluster in
-                ClusterRow(cluster: cluster) {
-                    selectedCluster = cluster
-                }
-            }
-        }
-    }
-    
     // MARK: - Actions
     
     func refreshClusters() {
-        clusters = clusterEngine.clusterSessions(todaySessions)
+        // Only cluster UNASSIGNED sessions
+        clusters = clusterEngine.clusterSessions(unassignedSessions)
     }
     
     func applyLabel(_ label: String, to cluster: ClusterResult) {
-        // Update all sessions in the cluster with the task label
         for session in cluster.sessions {
             session.userTaskLabel = label
         }
         try? modelContext.save()
-        
-        // Refresh clusters
         refreshClusters()
+    }
+    
+    func formatDuration(_ seconds: TimeInterval) -> String {
+        let minutes = Int(seconds / 60)
+        let h = minutes / 60
+        let m = minutes % 60
+        if h > 0 { return "\(h)h \(m)m" }
+        return "\(m)m"
     }
 }
 
-// MARK: - Cluster Row
+// MARK: - Task Thread Row (Assigned)
+
+struct TaskThreadRow: View {
+    let task: TaskItem
+    let sessions: [Session]
+    let totalDuration: TimeInterval
+    
+    @State private var isExpanded: Bool = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            Button {
+                withAnimation { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: 16) {
+                    // Time Badge
+                    Text(formatDuration(totalDuration))
+                        .font(.headline.monospacedDigit())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            Color(hex: task.project?.area?.themeColor ?? "") ?? .blue,
+                            in: RoundedRectangle(cornerRadius: 6)
+                        )
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(task.title)
+                            .font(.headline)
+                        
+                        if let project = task.project {
+                            Text(project.name)
+                                .font(.caption)
+                                .foregroundStyle(Color(hex: project.area?.themeColor ?? "") ?? .secondary)
+                        }
+                    }
+                    
+                    Spacer()
+                    
+                    Text("\(sessions.count) sessions")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    
+                    Image(systemName: "chevron.right")
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding()
+                .background(Color.white.opacity(0.03))
+            }
+            .buttonStyle(.plain)
+            
+            // Expanded Details
+            if isExpanded {
+                VStack(spacing: 0) {
+                    Divider()
+                        .background(Color.white.opacity(0.1))
+                    
+                    ForEach(sessions) { session in
+                        HStack {
+                            Text(session.startTimestamp, style: .time)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 60, alignment: .trailing)
+                            
+                            Text(session.appName)
+                                .font(.caption)
+                            
+                            if let domain = session.browserDomain {
+                                Text("• \(domain)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            
+                            Spacer()
+                            
+                            Text(formatDuration(session.duration))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 8)
+                        .background(Color.white.opacity(0.01))
+                    }
+                }
+            }
+        }
+        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+    }
+    
+    func formatDuration(_ seconds: TimeInterval) -> String {
+        let minutes = Int(seconds / 60)
+        let h = minutes / 60
+        let m = minutes % 60
+        if h > 0 { return "\(h)h \(m)m" }
+        return "\(m)m"
+    }
+}
+
+// MARK: - Cluster Row (Unassigned)
 
 struct ClusterRow: View {
     let cluster: ClusterResult
@@ -253,9 +347,9 @@ struct ClusterRow: View {
                 }
                 .frame(width: 70, alignment: .trailing)
                 
-                // Color bar
+                // Color bar (Gray for unassigned)
                 RoundedRectangle(cornerRadius: 2)
-                    .fill(cluster.confidence > 0.7 ? .green : .orange)
+                    .fill(.gray.opacity(0.3))
                     .frame(width: 4)
                 
                 // Content
@@ -263,6 +357,7 @@ struct ClusterRow: View {
                     HStack {
                         Text(cluster.label)
                             .font(.headline)
+                            .foregroundStyle(.secondary) // Muted for unassigned
                         
                         if cluster.suggestedLabel != nil {
                             Text("Suggested")
@@ -316,8 +411,7 @@ struct ClusterRow: View {
     }
 }
 
-// MARK: - Cluster Detail Sheet
-
+// MARK: - Cluster Detail Sheet (Same as before)
 struct ClusterDetailSheet: View {
     let cluster: ClusterResult
     let onLabel: (String) -> Void
@@ -428,135 +522,9 @@ struct ClusterDetailSheet: View {
     
     func formatDuration(_ seconds: TimeInterval) -> String {
         let minutes = Int(seconds / 60)
-        if minutes >= 60 {
-            let hours = minutes / 60
-            let mins = minutes % 60
-            return "\(hours)h \(mins)m"
-        }
-        return "\(minutes)m"
+        let h = minutes / 60
+        let m = minutes % 60
+        if h > 0 { return "\(h)h \(m)m" }
+        return "\(m)m"
     }
-}
-
-// MARK: - Focus Group Row
-
-struct FocusGroupRow: View {
-    let group: FocusGroup
-    
-    // Get time range
-    var startTime: Date? {
-        group.sessions.map(\.startTimestamp).min()
-    }
-    
-    var endTime: Date? {
-        group.sessions.compactMap(\.endTimestamp).max() ?? (group.sessions.isEmpty ? nil : Date())
-    }
-    
-    // Get unique domains from all browser visits
-    var uniqueDomains: [String] {
-        var domains: [String: TimeInterval] = [:]
-        for session in group.sessions {
-            for visit in session.browserVisits {
-                domains[visit.domain, default: 0] += visit.duration
-            }
-            if let domain = session.browserDomain {
-                domains[domain, default: 0] += session.duration
-            }
-        }
-        return domains.sorted { $0.value > $1.value }.map { $0.key }.prefix(5).map { $0 }
-    }
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Header with time
-            HStack {
-                // Time range
-                VStack(alignment: .trailing, spacing: 2) {
-                    if let start = startTime {
-                        Text(start, style: .time)
-                            .font(.caption.monospacedDigit())
-                    }
-                    Text(formatDuration(group.productiveTime))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(width: 60, alignment: .trailing)
-                
-                // Color bar
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(.blue.gradient)
-                    .frame(width: 4)
-                
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        Image(systemName: group.icon ?? "sparkles")
-                            .foregroundStyle(.blue)
-                            .font(.caption)
-                        Text(group.name)
-                            .font(.headline)
-                    }
-                    
-                    Text("\(group.sessionCount) sessions")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                
-                Spacer()
-                
-                // Distraction badge
-                if group.distractionTime > 60 {
-                    Label(formatDuration(group.distractionTime), systemImage: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-            }
-            
-            // Domains/websites visited (primary content)
-            if !uniqueDomains.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(uniqueDomains, id: \.self) { domain in
-                        HStack(spacing: 8) {
-                            Image(systemName: "globe")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            Text(domain)
-                                .font(.caption)
-                        }
-                    }
-                }
-                .padding(.leading, 72)
-            }
-            
-            // Apps used (secondary, collapsed)
-            let apps = Dictionary(grouping: group.sessions.filter { !$0.isGroupDistraction }, by: \.appName)
-                .sorted { $0.value.reduce(0) { $0 + $1.duration } > $1.value.reduce(0) { $0 + $1.duration } }
-                .prefix(3)
-            
-            if !apps.isEmpty {
-                HStack(spacing: 12) {
-                    ForEach(apps.map { $0.key }, id: \.self) { appName in
-                        Label(appName, systemImage: "app")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                .padding(.leading, 72)
-            }
-        }
-        .padding()
-        .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 12))
-    }
-    
-    func formatDuration(_ seconds: TimeInterval) -> String {
-        let minutes = Int(seconds / 60)
-        if minutes >= 60 {
-            let hours = minutes / 60
-            let mins = minutes % 60
-            return "\(hours)h \(mins)m"
-        }
-        return "\(minutes)m"
-    }
-}
-
-#Preview {
-    ClusterReviewView()
 }

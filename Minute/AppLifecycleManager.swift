@@ -21,7 +21,7 @@ struct AppLifecycleManager: View {
                 TabView(selection: $selectedTab) {
                     OrbitView() // The new "Goals" Dashboard
                         .tabItem {
-                            Label("Orbit", systemImage: "circle.hexagongrid.fill")
+                            Label("Dashboard", systemImage: "circle.hexagongrid.fill")
                         }
                         .tag(0)
                     
@@ -63,6 +63,10 @@ struct AppLifecycleManager: View {
             let service = TrackerService(modelContext: modelContext)
             self.trackerService = service
             service.startTracking()
+            
+            // Check Habits
+            let habitService = HabitService(modelContext: modelContext)
+            habitService.checkAndResetHabits()
         }
     }
 }

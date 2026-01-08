@@ -77,8 +77,9 @@ class TrackerService: ObservableObject {
         // SAFE APPROACH: Close current session, start new one (even if same app).
         
         // Preserve current app state
-        let currentApp = currentSession?.bundleID
-        let currentVisit = currentBrowserVisit
+        // Preserve current app state
+        _ = currentSession?.bundleID
+        _ = currentBrowserVisit
         
         closeCurrentSession()
         

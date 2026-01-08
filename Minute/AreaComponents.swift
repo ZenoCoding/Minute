@@ -103,7 +103,7 @@ extension Color {
             return nil
         }
 
-        self.init(sRGBColorSpace: .sRGB, red: r, green: g, blue: b, opacity: a)
+        self.init(red: r, green: g, blue: b, opacity: a)
     }
 }
 

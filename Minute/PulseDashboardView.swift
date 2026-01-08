@@ -8,6 +8,9 @@
 
 import SwiftUI
 import SwiftData
+import Charts
+import Combine
+import UniformTypeIdentifiers
 
 struct PulseDashboardView: View {
     @EnvironmentObject var tracker: TrackerService
@@ -24,6 +27,15 @@ struct PulseDashboardView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 32) {
+                
+                // Date Header
+                HStack {
+                    Text(Date(), format: .dateTime.weekday(.wide).month().day())
+                        .font(.largeTitle)
+                        .fontWeight(.bold)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
                 
                 // 1. Hero: Current Focus
                 CurrentFocusCard()
@@ -89,6 +101,7 @@ struct PulseDashboardView: View {
 
 struct CurrentFocusCard: View {
     @EnvironmentObject var tracker: TrackerService
+    @Environment(\.modelContext) private var modelContext
     @State private var timeElapsed: TimeInterval = 0
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     
@@ -157,21 +170,8 @@ struct CurrentFocusCard: View {
                 .padding(.vertical, 40)
             }
         }
-        .frame(maxWidth: .infinity)
-        .padding(40)
-        .background {
-            RoundedRectangle(cornerRadius: 24)
-                .fill(.ultraThinMaterial)
-                .stroke(
-                    LinearGradient(
-                        colors: [.white.opacity(0.2), .white.opacity(0.05)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-                .shadow(color: .black.opacity(0.1), radius: 20, x: 0, y: 10)
-        }
+        // ... styling ...
+        .onDrop(of: [.text], delegate: FocusDropDelegate(tracker: tracker, modelContext: modelContext, isTargeted: $isTargeted))
         .onReceive(timer) { _ in
             if let task = tracker.activeTask, 
                let current = tracker.currentSession,
@@ -182,6 +182,8 @@ struct CurrentFocusCard: View {
             }
         }
     }
+    
+    @State private var isTargeted = false
     
     func formatDuration(_ interval: TimeInterval) -> String {
         let hours = Int(interval) / 3600
@@ -282,5 +284,55 @@ struct AreaCompactCard: View {
         .frame(width: 120, height: 100)
         .padding(12)
         .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+// MARK: - Drop Delegate
+struct FocusDropDelegate: DropDelegate {
+    let tracker: TrackerService
+    let modelContext: ModelContext
+    @Binding var isTargeted: Bool
+    
+    func dropEntered(info: DropInfo) {
+        withAnimation {
+            isTargeted = true
+        }
+    }
+    
+    func dropExited(info: DropInfo) {
+        withAnimation {
+            isTargeted = false
+        }
+    }
+    
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.text])
+    }
+    
+    func performDrop(info: DropInfo) -> Bool {
+        guard let itemProvider = info.itemProviders(for: [.text]).first else { return false }
+        
+        itemProvider.loadItem(forTypeIdentifier: UTType.text.identifier, options: nil) { (data, error) in
+            guard let data = data as? Data,
+                  let uuidString = String(data: data, encoding: .utf8),
+                  let uuid = UUID(uuidString: uuidString) else { return }
+            
+            // Dispatch back to main thread
+            Task { @MainActor in
+                do {
+                    let descriptor = FetchDescriptor<TaskItem>(predicate: #Predicate { $0.id == uuid })
+                    if let task = try modelContext.fetch(descriptor).first {
+                        tracker.startTask(task)
+                    }
+                } catch {
+                    print("Failed to find task: \(error)")
+                }
+                
+                withAnimation {
+                    isTargeted = false
+                }
+            }
+        }
+        return true
     }
 }

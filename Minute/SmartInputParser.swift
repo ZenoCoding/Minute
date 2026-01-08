@@ -15,6 +15,8 @@ struct SmartInputParser {
         let project: Project?
         let duration: TimeInterval?
         let date: Date?
+        let isRecurring: Bool
+        let recurrenceInterval: String?
     }
     
     /// Parses the raw input text to find a matching project and duration.
@@ -222,7 +224,29 @@ struct SmartInputParser {
             }
         }
         
-        return Result(cleanTitle: remainingText, project: foundProject, duration: foundDuration, date: foundDate)
+        // 6. Detect Recurrence (Habits)
+        var foundRecurrence: String?
+        
+        let recurrencePatterns = [
+            (pattern: #"\b(every day|daily)\b"#, interval: "daily"),
+            (pattern: #"\b(every week|weekly)\b"#, interval: "weekly")
+        ]
+        
+        for (pattern, interval) in recurrencePatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+                let matches = regex.matches(in: remainingText, range: NSRange(remainingText.startIndex..., in: remainingText))
+                if let match = matches.first, let range = Range(match.range, in: remainingText) {
+                    foundRecurrence = interval
+                    // Remove from text
+                    let matchedStr = String(remainingText[range])
+                    remainingText = remainingText.replacingOccurrences(of: matchedStr, with: "")
+                        .replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces)
+                    break // Only support one interval for now
+                }
+            }
+        }
+        
+        return Result(cleanTitle: remainingText, project: foundProject, duration: foundDuration, date: foundDate, isRecurring: foundRecurrence != nil, recurrenceInterval: foundRecurrence)
     }
     
     // MARK: - Helpers

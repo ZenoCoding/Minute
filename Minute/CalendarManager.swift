@@ -8,6 +8,7 @@
 import Foundation
 import EventKit
 import SwiftUI
+import Combine
 
 @MainActor
 class CalendarManager: ObservableObject {
@@ -21,15 +22,23 @@ class CalendarManager: ObservableObject {
     
     func checkStatus() {
         self.authorizationStatus = EKEventStore.authorizationStatus(for: .event)
-        if self.authorizationStatus == .authorized {
+        if self.authorizationStatus == .fullAccess || self.authorizationStatus == .writeOnly {
             fetchEvents()
         }
     }
     
     func requestAccess() {
-        store.requestAccess(to: .event) { [weak self] granted, error in
-            DispatchQueue.main.async {
-                self?.checkStatus()
+        if #available(macOS 14.0, *) {
+            store.requestFullAccessToEvents { [weak self] granted, error in
+                DispatchQueue.main.async {
+                    self?.checkStatus()
+                }
+            }
+        } else {
+            store.requestAccess(to: .event) { [weak self] granted, error in
+                DispatchQueue.main.async {
+                    self?.checkStatus()
+                }
             }
         }
     }

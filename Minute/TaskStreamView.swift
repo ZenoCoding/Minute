@@ -9,6 +9,8 @@
 import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
+import EventKit
+import Combine
 
 struct TaskStreamView: View {
     @EnvironmentObject var tracker: TrackerService
@@ -46,17 +48,44 @@ struct TaskStreamView: View {
                 VStack(spacing: 8) {
                     
                     // Calendar / Schedule Section
-                    if calendarManager.authorizationStatus == .authorized {
-                        let todayEvents = calendarManager.events(for: Date())
-                        if !todayEvents.isEmpty {
+                    if calendarManager.authorizationStatus == .fullAccess || calendarManager.authorizationStatus == .writeOnly {
+                        // Filter out past events
+                        let now = Date()
+                        let allTodayEvents = calendarManager.events(for: now)
+                        let upcomingEvents = allTodayEvents.filter { $0.endDate > now }
+                        
+                        if !upcomingEvents.isEmpty {
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("Schedule")
-                                    .font(.headline)
-                                    .foregroundStyle(.secondary)
+                                Button(action: { withAnimation { isScheduleExpanded.toggle() } }) {
+                                    HStack {
+                                        Text("Schedule")
+                                            .font(.headline)
+                                            .foregroundStyle(.secondary)
+                                        
+                                        Spacer()
+                                        
+                                        Text("\(upcomingEvents.count)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.secondary.opacity(0.1), in: Capsule())
+                                        
+                                        Image(systemName: "chevron.right")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .rotationEffect(.degrees(isScheduleExpanded ? 90 : 0))
+                                    }
                                     .padding(.horizontal, 4)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
                                 
-                                ForEach(todayEvents, id: \.eventIdentifier) { event in
-                                    CalendarEventRow(event: event)
+                                if isScheduleExpanded {
+                                    ForEach(upcomingEvents, id: \.eventIdentifier) { event in
+                                        CalendarEventRow(event: event)
+                                            .transition(.opacity.combined(with: .move(edge: .top)))
+                                    }
                                 }
                             }
                             .padding(.horizontal)
@@ -74,39 +103,44 @@ struct TaskStreamView: View {
                         .padding(.horizontal)
                     }
                     
-                    // Header Status
-                    HStack {
-                        Text("Today's Stream")
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Text("\(streamTasks.count)")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.black.opacity(0.1), in: Capsule()) // Darker for contrast on glass
-                    }
-                    .padding(.top, 4)
-                    .padding(.horizontal, 4)
-                    
-                    if streamTasks.isEmpty {
+                    if sections.isEmpty {
                         EmptyStreamView()
                     } else {
-                        ForEach(streamTasks) { item in
-                            TaskStreamRow(item: item)
-                                .opacity(draggedTask?.id == item.task.id ? 0.0 : 1.0)
-                                .onDrag {
-                                    self.draggedTask = item.task
-                                    return NSItemProvider(object: item.task.id.uuidString as NSString)
-                                } preview: {
-                                    TaskStreamRow(item: item)
-                                        .frame(width: 350)
-                                        .background(.regularMaterial)
-                                        .cornerRadius(12)
-                                        .contentShape(DragPreviewShape())
+                        ForEach(sections) { section in
+                            VStack(alignment: .leading, spacing: 8) {
+                                // Section Header
+                                HStack {
+                                    Text(section.title)
+                                        .font(.headline)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text("\(section.tasks.count)")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.black.opacity(0.1), in: Capsule())
                                 }
-                                .onDrop(of: [.text], delegate: TaskDropDelegate(item: item.task, items: $orderedTasks, draggedItem: $draggedTask, modelContext: modelContext))
+                                .padding(.top, 16)
+                                .padding(.horizontal, 4)
+                                
+                                // Tasks
+                                ForEach(section.tasks) { item in
+                                    TaskStreamRow(item: item, onEdit: { editingTask = item.task })
+                                        .opacity(draggedTask?.id == item.task.id ? 0.0 : 1.0)
+                                        .onDrag {
+                                            self.draggedTask = item.task
+                                            return NSItemProvider(object: item.task.id.uuidString as NSString)
+                                        } preview: {
+                                            TaskStreamRow(item: item, onEdit: {})
+                                                .frame(width: 350)
+                                                .background(.regularMaterial)
+                                                .cornerRadius(12)
+                                                .contentShape(DragPreviewShape())
+                                        }
+                                        .onDrop(of: [.text], delegate: TaskDropDelegate(item: item.task, items: $orderedTasks, draggedItem: $draggedTask, modelContext: modelContext))
+                                }
+                            }
                         }
                     }
                 }
@@ -135,6 +169,9 @@ struct TaskStreamView: View {
             .onChange(of: allIncompleteTasks) { _, _ in syncTasks() }
             .onChange(of: allProjects) { _, _ in syncTasks() }
             .onChange(of: allCompletedTasks) { _, _ in syncCompleted() }
+            .sheet(item: $editingTask) { task in
+                EditTaskSheet(task: task)
+            }
         }
         .background(.regularMaterial) // Unified Sidebar Material
     }
@@ -143,6 +180,8 @@ struct TaskStreamView: View {
     @State private var orderedTasks: [StreamItem] = []
     @State private var drags: [StreamItem] = [] // Unused but kept for structure if needed
     @State private var draggedTask: TaskItem?
+    @State private var isScheduleExpanded = true
+    @State private var editingTask: TaskItem?
     
     // Recent Archive
     @Query(filter: #Predicate<TaskItem> { $0.isCompleted }, sort: \TaskItem.completedAt, order: .reverse)
@@ -205,6 +244,46 @@ struct TaskStreamView: View {
         // Let's do a soft sort check.
         orderedTasks.sort { $0.task.orderIndex < $1.task.orderIndex }
     }
+    
+    // MARK: - Sections Logic
+    
+    struct StreamSection: Identifiable {
+        let id = UUID()
+        let title: String
+        let tasks: [StreamItem]
+    }
+    
+    var sections: [StreamSection] {
+        var today: [StreamItem] = []
+        var week: [StreamItem] = []
+        var backlog: [StreamItem] = []
+        
+        let calendar = Calendar.current
+        let now = Date()
+        let todayEnd = calendar.startOfDay(for: now).addingTimeInterval(86400)
+        let weekEnd = calendar.date(byAdding: .day, value: 7, to: now)!
+        
+        for item in orderedTasks {
+            if let date = item.task.dueDate {
+                if date < todayEnd {
+                    today.append(item)
+                } else if date < weekEnd {
+                    week.append(item)
+                } else {
+                    backlog.append(item)
+                }
+            } else {
+                backlog.append(item)
+            }
+        }
+        
+        var result: [StreamSection] = []
+        if !today.isEmpty { result.append(StreamSection(title: "Today", tasks: today)) }
+        if !week.isEmpty { result.append(StreamSection(title: "This Week", tasks: week)) }
+        if !backlog.isEmpty { result.append(StreamSection(title: "Backlog", tasks: backlog)) }
+        
+        return result
+    }
 }
 
 // MARK: - Inline Composer
@@ -222,6 +301,11 @@ struct InlineTaskComposer: View {
     @State private var showDurationPicker = false
     @State private var customDurationText: String = ""
     
+    // Recurrence State
+    @State private var detectedRecurrence: String?
+    @State private var selectedRecurrence: String? // "daily", "weekly" or nil
+    @State private var showRecurrencePicker = false
+    
     // Manual Overrides
     @State private var selectedProject: Project?
     @State private var selectedDate: Date?
@@ -234,6 +318,10 @@ struct InlineTaskComposer: View {
     
     var effectiveDuration: TimeInterval? {
         selectedDuration ?? detectedDuration
+    }
+    
+    var effectiveRecurrence: String? {
+        selectedRecurrence ?? detectedRecurrence
     }
     
     var effectiveDate: Date? {
@@ -277,14 +365,16 @@ struct InlineTaskComposer: View {
                                 if let project = effectiveProject {
                                     if let icon = project.area?.iconName {
                                         Image(systemName: icon)
-                                            .font(.caption)
+                                            .font(.subheadline)
                                     }
                                     Text(project.name)
                                         .font(.caption)
                                         .fontWeight(.medium)
+                                        .lineLimit(1)
                                 } else {
                                     Text("Select Project")
                                         .font(.caption)
+                                        .lineLimit(1)
                                 }
                             }
                         }
@@ -329,7 +419,7 @@ struct InlineTaskComposer: View {
                         ComposerMenuLabel {
                             HStack(spacing: 4) {
                                 Image(systemName: "calendar")
-                                    .font(.caption2)
+                                    .font(.caption)
                                     .foregroundStyle(.secondary)
                                 
                                 if let date = effectiveDate {
@@ -337,10 +427,7 @@ struct InlineTaskComposer: View {
                                         .font(.caption)
                                         .fontWeight(.medium)
                                         .foregroundStyle(isToday(date) ? .green : .primary)
-                                } else {
-                                    Text("No Date")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
                                 }
                             }
                         }
@@ -387,15 +474,16 @@ struct InlineTaskComposer: View {
                         ComposerMenuLabel {
                             HStack(spacing: 4) {
                                 Image(systemName: "hourglass")
-                                    .font(.caption2)
+                                    .font(.caption)
                                     .foregroundStyle(.secondary)
                                 
                                 if let duration = effectiveDuration {
                                     Text(formatDuration(duration))
                                         .font(.caption)
                                         .fontWeight(.medium)
+                                        .foregroundStyle(.blue)
+                                        .lineLimit(1)
                                 }
-                                // Removed "Est. Time" text for compact icon-only look
                             }
                         }
                     }
@@ -459,6 +547,56 @@ struct InlineTaskComposer: View {
                         .frame(width: 160)
                     }
                     
+                    // 4. Recurrence Selector
+                    Button {
+                        showRecurrencePicker = true
+                    } label: {
+                        ComposerMenuLabel {
+                            HStack(spacing: 4) {
+                                Image(systemName: "repeat")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                
+                                if let interval = effectiveRecurrence {
+                                    Text(interval.capitalized)
+                                        .font(.caption)
+                                        .fontWeight(.medium)
+                                        .foregroundStyle(.blue)
+                                        .lineLimit(1)
+                                }
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .popover(isPresented: $showRecurrencePicker, arrowEdge: .bottom) {
+                        VStack(spacing: 4) {
+                            Button { selectedRecurrence = nil; showRecurrencePicker = false } label: {
+                                Label("None", systemImage: "xmark.circle")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(8)
+                            }
+                            .buttonStyle(.plain)
+                            
+                            Divider()
+                            
+                            Button { selectedRecurrence = "daily"; showRecurrencePicker = false } label: {
+                                Label("Daily", systemImage: "sun.max")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(8)
+                            }
+                            .buttonStyle(.plain)
+                            
+                            Button { selectedRecurrence = "weekly"; showRecurrencePicker = false } label: {
+                                Label("Weekly", systemImage: "calendar")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(8)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(8)
+                        .frame(width: 140)
+                    }
+                    
                     Spacer()
                     
                     // Add Button (Visual confirmation)
@@ -472,11 +610,11 @@ struct InlineTaskComposer: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.bottom, 10)
-                .padding(.top, 4) // Reduced top padding since divider is gone
+                .padding(.top, 4)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .padding(.horizontal, 4) // Reduced internal padding
+        .padding(.horizontal, 4)
         .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 12))
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: text.isEmpty)
     }
@@ -488,6 +626,7 @@ struct InlineTaskComposer: View {
             self.detectedProject = result.project
             self.detectedDuration = result.duration
             self.detectedDate = result.date
+            self.detectedRecurrence = result.recurrenceInterval
         }
     }
     
@@ -505,6 +644,11 @@ struct InlineTaskComposer: View {
             dueDate: effectiveDate
         )
         
+        if let recurrence = effectiveRecurrence {
+            task.isRecurring = true
+            task.recurrenceInterval = recurrence
+        }
+        
         modelContext.insert(task)
         
         // Reset
@@ -521,6 +665,8 @@ struct InlineTaskComposer: View {
         detectedProject = nil
         detectedDuration = nil
         detectedDate = nil
+        detectedRecurrence = nil
+        selectedRecurrence = nil
     }
     
     private func formatDuration(_ seconds: TimeInterval) -> String {
@@ -559,15 +705,14 @@ struct ComposerMenuLabel<Content: View>: View {
             .padding(.vertical, 6)
             .padding(.horizontal, 10)
             .background {
-                Capsule()
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .glassEffect(.regular)
-                    .opacity(isHovering ? 1.0 : 0.0)
+                    .opacity(isHovering ? 0.6 : 0.0)
             }
             .overlay(
-                Capsule()
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .stroke(Color.white.opacity(isHovering ? 0.3 : 0.0), lineWidth: 1)
             )
-            .scaleEffect(isHovering ? 1.02 : 1.0)
             .onHover { hover in
                 withAnimation(.easeInOut(duration: 0.2)) {
                     isHovering = hover
@@ -591,7 +736,7 @@ struct TaskDropDelegate: DropDelegate {
             if let from = items.firstIndex(where: { $0.task.id == draggedItem.id }),
                let to = items.firstIndex(where: { $0.task.id == item.id }) {
                 withAnimation(.default) {
-                _ = items.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+                items.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
                 }
             }
         }
@@ -623,6 +768,7 @@ struct StreamItem: Identifiable {
 
 struct TaskStreamRow: View {
     let item: StreamItem
+    let onEdit: () -> Void
     @EnvironmentObject var tracker: TrackerService
     @Environment(\.modelContext) private var modelContext
     @State private var isHovering = false
@@ -659,28 +805,7 @@ struct TaskStreamRow: View {
     
     var body: some View {
         HStack(spacing: 12) {
-            // Play/Pause Button
-            Button(action: {
-                if isActive {
-                    tracker.stopCurrentTask()
-                } else {
-                    tracker.startTask(item.task)
-                }
-            }) {
-                ZStack {
-                    Circle()
-                        .fill(isActive ? Color.accentColor : Color.clear)
-                        .stroke(isActive ? Color.accentColor : .secondary.opacity(0.3), lineWidth: 1)
-                        .frame(width: 24, height: 24)
-                    
-                    Image(systemName: isActive ? "pause.fill" : "play.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(isActive ? .white : .secondary)
-                        .offset(x: isActive ? 0 : 1) // Optical center active
-                }
-                .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
+
             
             // Checkbox (Completion)
             Button(action: {
@@ -734,6 +859,13 @@ struct TaskStreamRow: View {
                         .font(.caption2)
                         .foregroundStyle(isOverdue(date) ? .red : .secondary)
                     }
+
+                    
+                    if item.task.isRecurring {
+                        Image(systemName: "repeat")
+                            .font(.caption2)
+                            .foregroundStyle(.blue)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -752,10 +884,25 @@ struct TaskStreamRow: View {
             // Hover Actions
             if isHovering {
                 HStack(spacing: 0) {
+                    // Play Button
+                    Button(action: {
+                        if isActive {
+                            tracker.stopCurrentTask()
+                        } else {
+                            tracker.startTask(item.task)
+                        }
+                    }) {
+                         Image(systemName: isActive ? "pause.fill" : "play.fill")
+                            .font(.system(size: 14))
+                            .foregroundStyle(isActive ? Color.accentColor : .secondary)
+                            .padding(6)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(isActive ? "Pause" : "Start")
 
-                    
                     Menu {
-                        Button("Edit Task...") { /* TODO */ }
+                        Button("Edit Task...") { onEdit() }
                         Divider()
                         Button("Delete", role: .destructive) {
                             withAnimation {
@@ -787,6 +934,18 @@ struct TaskStreamRow: View {
         .cornerRadius(8)
         .onHover { hover in
             isHovering = hover
+        }
+        .onTapGesture(count: 2) {
+            onEdit()
+        }
+        .contextMenu {
+            Button("Edit Task...") { onEdit() }
+            Divider()
+            Button("Delete", role: .destructive) {
+                withAnimation {
+                    modelContext.delete(item.task)
+                }
+            }
         }
     }
 }

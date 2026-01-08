@@ -237,6 +237,10 @@ enum ProjectStatus: String, Codable {
     var estimatedDuration: TimeInterval?
     var dueDate: Date?
     
+    // Recurrence (Habits)
+    var isRecurring: Bool = false
+    var recurrenceInterval: String? // "daily", "weekly", etc.
+    
     // Tracking
     @Relationship(deleteRule: .nullify)
     var sessions: [Session] = []
