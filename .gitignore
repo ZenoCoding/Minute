@@ -1,0 +1,27 @@
+# Xcode
+.DS_Store
+*/.DS_Store
+*.swp
+*~.nib
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.hmap
+*.xccheckout
+*.moved-aside
+DerivedData
+*.hmap
+*.ipa
+*.xcuserstate
+
+# Build generated
+Build/
+Releases/
+debug_host.log
+
+# SwiftPM
+.build/
+
+# Other
+*.moved-aside

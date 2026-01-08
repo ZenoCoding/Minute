@@ -21,6 +21,14 @@ class TaskInferenceService: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var lastInferenceTime: Date?
     
+    // Response Model
+    struct InferenceResult: Codable {
+        let taskId: String?
+        let projectId: String?
+        let label: String?
+        let confidence: Double?
+    }
+    
     init() {
         // Load API key from UserDefaults or environment
         self.apiKey = UserDefaults.standard.string(forKey: "GeminiAPIKey") ?? ""
@@ -43,12 +51,20 @@ class TaskInferenceService: ObservableObject {
             return
         }
         
-        // Filter to sessions needing labels
-        let unlabeled = sessions.filter { $0.inferredTask == nil && $0.userTaskLabel == nil }
+        // Filter to sessions needing labels (unassigned task, project, and inferred label)
+        let unlabeled = sessions.filter { $0.task == nil && $0.inferredTask == nil && $0.userTaskLabel == nil }
         guard !unlabeled.isEmpty else { return }
         
         isProcessing = true
         lastError = nil
+        
+        // Fetch Context (Active Tasks and Projects)
+        let activeTasks = try? modelContext.fetch(FetchDescriptor<TaskItem>(
+            predicate: #Predicate { !$0.isCompleted }
+        ))
+        
+        let allProjects = try? modelContext.fetch(FetchDescriptor<Project>())
+        let activeProjects = allProjects?.filter { $0.status == .active }
         
         defer { isProcessing = false }
         
@@ -60,11 +76,32 @@ class TaskInferenceService: ObservableObject {
         
         for batch in batches {
             do {
-                let labels = try await inferBatch(sessions: batch)
+                let results = try await inferBatch(sessions: batch, tasks: activeTasks ?? [], projects: activeProjects ?? [])
                 
-                // Apply labels to sessions
-                for (session, label) in zip(batch, labels) {
-                    session.inferredTask = label
+                // Apply results to sessions
+                for (session, result) in zip(batch, results) {
+                    
+                    // 1. Try Strict Task Link
+                    if let taskIdStr = result.taskId,
+                       let uuid = UUID(uuidString: taskIdStr),
+                       let task = activeTasks?.first(where: { $0.id == uuid }) {
+                        session.task = task
+                        session.inferredTask = task.title // Fallback label
+                    }
+                    // 2. Try Project Categorization
+                    else if let projectIdStr = result.projectId,
+                            let uuid = UUID(uuidString: projectIdStr),
+                            let project = activeProjects?.first(where: { $0.id == uuid }) {
+                        session.project = project
+                        session.inferredTask = result.label ?? project.name // Fallback label
+                    }
+                    // 3. Fallback Label
+                    else {
+                        session.inferredTask = result.label
+                    }
+                    
+                    // Link confidence (default to 0.8 if AI returns nil)
+                    session.confidence = result.confidence ?? 0.8
                     session.needsReview = false  // AI labeled
                 }
                 
@@ -79,7 +116,7 @@ class TaskInferenceService: ObservableObject {
     }
     
     /// Infer labels for a batch of sessions
-    private func inferBatch(sessions: [Session]) async throws -> [String] {
+    private func inferBatch(sessions: [Session], tasks: [TaskItem], projects: [Project]) async throws -> [InferenceResult] {
         // Build prompt with session context
         var sessionDescriptions: [String] = []
         
@@ -114,26 +151,40 @@ class TaskInferenceService: ObservableObject {
             sessionDescriptions.append(desc)
         }
         
+        // Build Candidate Lists
+        let taskList = tasks.map { "- [Task] ID: \($0.id.uuidString), Title: \($0.title), Project: \($0.project?.name ?? "None")" }.joined(separator: "\n")
+        let projectList = projects.map { "- [Project] ID: \($0.id.uuidString), Name: \($0.name)" }.joined(separator: "\n")
+        
         let prompt = """
-        You are a productivity assistant. Based on the following app usage sessions, infer what task the user was working on.
+        You are a productivity AI. Assign these work sessions to the correct Task or Project.
         
-        For each session, provide a short task label (2-5 words) that describes the activity.
-        Examples: "iOS Development", "Research", "Email", "Video Watching", "Documentation", "Code Review", "Shopping", "Social Media"
+        Priority Logic:
+        1. **Strict Match**: If a session clearly belongs to an active Task, output its `taskId`.
+        2. **Category Match**: If no Task matches, but it belongs to a Project, output its `projectId`.
+        3. **Fallback**: If neither, provide a short descriptive `label` (2-5 words).
         
-        Sessions:
+        Active Tasks:
+        \(taskList)
+        
+        Active Projects:
+        \(projectList)
+        
+        Sessions to Classify:
         \(sessionDescriptions.joined(separator: "\n\n"))
         
-        Respond with ONLY a JSON array of task labels, one per session, in the same order:
-        ["label1", "label2", ...]
+        Respond with ONLY a JSON array of objects, one per session, in order:
+        [
+          { "taskId": "UUID" (or null), "projectId": "UUID" (or null), "label": "String", "confidence": 0.0-1.0 }
+        ]
         """
         
         // Call Gemini API
         let response = try await callGemini(prompt: prompt)
         
         // Parse response
-        let labels = try parseLabels(from: response, expectedCount: sessions.count)
+        let results = try parseResults(from: response, expectedCount: sessions.count)
         
-        return labels
+        return results
     }
     
     /// Call Gemini API
@@ -153,8 +204,8 @@ class TaskInferenceService: ObservableObject {
                 ]
             ],
             "generationConfig": [
-                "temperature": 0.3,
-                "maxOutputTokens": 2000
+                "temperature": 0.2,
+                "maxOutputTokens": 4000
             ]
         ]
         
@@ -185,8 +236,8 @@ class TaskInferenceService: ObservableObject {
         return text
     }
     
-    /// Parse task labels from Gemini response
-    private func parseLabels(from response: String, expectedCount: Int) throws -> [String] {
+    /// Parse results from Gemini response
+    private func parseResults(from response: String, expectedCount: Int) throws -> [InferenceResult] {
         // print("TaskInference: Raw response: \(response)")
         
         // Extract JSON array from response
@@ -194,7 +245,6 @@ class TaskInferenceService: ObservableObject {
         
         // Remove markdown code blocks if present
         if jsonString.contains("```") {
-            // Extract content between ``` markers
             let lines = jsonString.components(separatedBy: "\n")
             var inCodeBlock = false
             var codeLines: [String] = []
@@ -218,23 +268,28 @@ class TaskInferenceService: ObservableObject {
             jsonString = String(jsonString[startRange.lowerBound...endRange.upperBound])
         }
         
-        print("TaskInference: Extracted JSON: \(jsonString)")
+        // print("TaskInference: Extracted JSON: \(jsonString)")
         
-        guard let data = jsonString.data(using: .utf8),
-              let labels = try? JSONSerialization.jsonObject(with: data) as? [String] else {
-            print("TaskInference: Failed to parse as [String]")
+        guard let data = jsonString.data(using: .utf8) else {
             throw InferenceError.parseError
         }
         
-        print("TaskInference: Parsed \(labels.count) labels: \(labels)")
-        
-        // Ensure we have the right number of labels
-        if labels.count < expectedCount {
-            // Pad with "Unknown"
-            return labels + Array(repeating: "Unknown", count: expectedCount - labels.count)
+        do {
+            let results = try JSONDecoder().decode([InferenceResult].self, from: data)
+            // print("TaskInference: Parsed \(results.count) results")
+            
+            // Ensure we have the right number of labels
+            if results.count < expectedCount {
+                // Pad with empty results
+                let dummy = InferenceResult(taskId: nil, projectId: nil, label: "Unknown", confidence: 0.0)
+                return results + Array(repeating: dummy, count: expectedCount - results.count)
+            }
+            
+            return Array(results.prefix(expectedCount))
+        } catch {
+            print("TaskInference: JSON Decode Error - \(error)")
+            throw InferenceError.parseError
         }
-        
-        return Array(labels.prefix(expectedCount))
     }
     
     // MARK: - Errors
