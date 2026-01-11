@@ -127,6 +127,7 @@ struct TaskStreamView: View {
                                 // Tasks
                                 ForEach(section.tasks) { item in
                                     TaskStreamRow(item: item, onEdit: { editingTask = item.task })
+                                        .transition(.move(edge: .top).combined(with: .opacity))
                                         .opacity(draggedTask?.id == item.task.id ? 0.0 : 1.0)
                                         .onDrag {
                                             self.draggedTask = item.task
@@ -166,8 +167,12 @@ struct TaskStreamView: View {
                 }
             }
             .onAppear(perform: syncTasks)
-            .onChange(of: allIncompleteTasks) { _, _ in syncTasks() }
-            .onChange(of: allProjects) { _, _ in syncTasks() }
+            .onChange(of: allIncompleteTasks) { _, _ in
+                withAnimation { syncTasks() }
+            }
+            .onChange(of: allProjects) { _, _ in
+                withAnimation { syncTasks() }
+            }
             .onChange(of: allCompletedTasks) { _, _ in syncCompleted() }
             .sheet(item: $editingTask) { task in
                 EditTaskSheet(task: task)
@@ -248,7 +253,7 @@ struct TaskStreamView: View {
     // MARK: - Sections Logic
     
     struct StreamSection: Identifiable {
-        let id = UUID()
+        var id: String { title }
         let title: String
         let tasks: [StreamItem]
     }
@@ -275,6 +280,14 @@ struct TaskStreamView: View {
             } else {
                 backlog.append(item)
             }
+        }
+        
+        // Sort future sections by date
+        week.sort { ($0.task.dueDate ?? .distantFuture) < ($1.task.dueDate ?? .distantFuture) }
+        backlog.sort {
+            let d1 = $0.task.dueDate ?? .distantFuture
+            let d2 = $1.task.dueDate ?? .distantFuture
+            return d1 < d2
         }
         
         var result: [StreamSection] = []
@@ -759,7 +772,7 @@ struct TaskDropDelegate: DropDelegate {
 // MARK: - Models
 
 struct StreamItem: Identifiable {
-    let id = UUID()
+    var id: UUID { task.id }
     let task: TaskItem
     let project: Project
 }
@@ -803,23 +816,33 @@ struct TaskStreamRow: View {
         tracker.activeTask?.id == item.task.id
     }
     
+    @State private var isCompleting = false
+    
     var body: some View {
         HStack(spacing: 12) {
 
             
             // Checkbox (Completion)
             Button(action: {
+                // Optimistic UI update
+                withAnimation(.snappy) {
+                    isCompleting = true
+                }
+                
                 // If completing active task, stop first
                 if isActive { tracker.stopCurrentTask() }
                 
-                withAnimation {
-                    item.task.isCompleted = true
-                    item.task.completedAt = Date()
+                // Delay actual data deletion to let animation play
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    withAnimation {
+                        item.task.isCompleted = true
+                        item.task.completedAt = Date()
+                    }
                 }
             }) {
-                Image(systemName: "circle")
+                Image(systemName: isCompleting ? "checkmark.circle.fill" : "circle")
                    .font(.system(size: 18))
-                   .foregroundStyle(.tertiary)
+                   .foregroundStyle(isCompleting ? .green : .secondary)
             }
             .buttonStyle(.plain)
             
@@ -828,6 +851,9 @@ struct TaskStreamRow: View {
                 Text(item.task.title)
                     .font(.body)
                     .fontWeight(.medium)
+                    .lineLimit(1)
+                    .strikethrough(isCompleting)
+                    .foregroundStyle(isCompleting ? .secondary : .primary)
                 
                 
                 HStack(spacing: 8) {
@@ -838,6 +864,7 @@ struct TaskStreamRow: View {
                         }
                         Text(item.project.name)
                             .font(.caption)
+                            .lineLimit(1)
                     }
                     .foregroundStyle(projectColor)
                     
@@ -932,6 +959,7 @@ struct TaskStreamRow: View {
         )
         .background(isActive ? Color.accentColor.opacity(0.1) : Color.clear)
         .cornerRadius(8)
+        .contentShape(Rectangle())
         .onHover { hover in
             isHovering = hover
         }
@@ -1019,3 +1047,4 @@ struct CalendarEventRow: View {
         .cornerRadius(6)
     }
 }
+

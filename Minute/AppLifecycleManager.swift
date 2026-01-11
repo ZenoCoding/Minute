@@ -10,7 +10,7 @@ import SwiftData
 
 struct AppLifecycleManager: View {
     @Environment(\.modelContext) private var modelContext
-    @StateObject private var calendarManager = CalendarManager()
+    @EnvironmentObject var calendarManager: CalendarManager
     @State private var trackerService: TrackerService?
     @State private var selectedTab = 0
     @State private var isInitialized = false
@@ -42,6 +42,12 @@ struct AppLifecycleManager: View {
                             Label("Timer", systemImage: "timer")
                         }
                         .tag(3)
+                    
+                    SessionDebugView()
+                        .tabItem {
+                            Label("Debug", systemImage: "ant.fill")
+                        }
+                        .tag(5)
                     
                     SettingsView()
                         .tabItem {

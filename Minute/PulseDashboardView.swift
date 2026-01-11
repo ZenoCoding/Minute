@@ -136,10 +136,46 @@ struct CurrentFocusCard: View {
                     }
                 }
                 
-                // Timer
-                Text(formatDuration(timeElapsed))
-                    .font(.system(size: 64, weight: .light).monospacedDigit())
-                    .contentTransition(.numericText())
+                // Timer Section
+                VStack(spacing: 8) {
+                    // Main Timer (Productive Only)
+                    Text(formatDuration(productiveTime))
+                        .font(.system(size: 64, weight: .light).monospacedDigit())
+                        .contentTransition(.numericText())
+                        .opacity(isDistracted ? 0.3 : 1.0)
+                        .overlay {
+                            if isDistracted {
+                                Text("PAUSED")
+                                    .font(.title2)
+                                    .fontWeight(.bold)
+                                    .foregroundStyle(.red)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 4)
+                                    .background(.ultraThinMaterial, in: Capsule())
+                            }
+                        }
+                    
+                    // Stats Row
+                    HStack(spacing: 16) {
+                        HStack(spacing: 4) {
+                            Text("Lost:")
+                            Text(formatDuration(lostTime))
+                                .monospacedDigit()
+                                .foregroundStyle(lostTime > 0 ? .red : .secondary)
+                        }
+                        
+                        Text("•")
+                            .foregroundStyle(.tertiary)
+                        
+                        HStack(spacing: 4) {
+                            Text("Total:")
+                            Text(formatDuration(totalTime))
+                                .monospacedDigit()
+                        }
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                }
                 
                 Button(action: { tracker.stopCurrentTask() }) {
                     Label("Stop Session", systemImage: "stop.fill")
@@ -173,18 +209,32 @@ struct CurrentFocusCard: View {
         // ... styling ...
         .onDrop(of: [.text], delegate: FocusDropDelegate(tracker: tracker, modelContext: modelContext, isTargeted: $isTargeted))
         .onReceive(timer) { _ in
-            if let task = tracker.activeTask, 
-               let current = tracker.currentSession,
-               current.task?.id == task.id {
-                timeElapsed = current.duration
+            if let task = tracker.activeTask {
+                productiveTime = task.productiveDuration
+                lostTime = task.distractedDuration
+                totalTime = task.totalDuration
+                
+                // Check if currently distracted to Dim UI
+                // We check the LIVE session
+                if let current = tracker.currentSession {
+                    isDistracted = current.isEffectiveDistraction
+                } else {
+                    isDistracted = false
+                }
             } else {
-                timeElapsed = 0
+                productiveTime = 0
+                lostTime = 0
+                totalTime = 0
+                isDistracted = false
             }
         }
     }
     
     @State private var isTargeted = false
-    
+    @State private var productiveTime: TimeInterval = 0
+    @State private var lostTime: TimeInterval = 0
+    @State private var totalTime: TimeInterval = 0
+    @State private var isDistracted: Bool = false
     func formatDuration(_ interval: TimeInterval) -> String {
         let hours = Int(interval) / 3600
         let minutes = (Int(interval) % 3600) / 60
@@ -267,7 +317,7 @@ struct AreaCompactCard: View {
     let area: Area
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .center, spacing: 8) {
             Image(systemName: area.iconName)
                 .font(.title2)
                 .foregroundStyle(Color(hex: area.themeColor) ?? .blue)
@@ -275,13 +325,15 @@ struct AreaCompactCard: View {
             Text(area.name)
                 .font(.subheadline)
                 .fontWeight(.medium)
-                .lineLimit(1)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
             
             Text("\(area.projects.filter { $0.status == .active }.count) projects")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
-        .frame(width: 120, height: 100)
+        .frame(width: 140, height: 110)
         .padding(12)
         .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
     }

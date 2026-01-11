@@ -237,6 +237,51 @@ struct TaskThreadRow: View {
     
     @State private var isExpanded: Bool = false
     
+    var productiveDuration: TimeInterval {
+        sessions.filter { task.isRelevant($0) }.reduce(0) { $0 + $1.duration }
+    }
+    
+    var lostDuration: TimeInterval {
+        sessions.filter { !task.isRelevant($0) }.reduce(0) { $0 + $1.duration }
+    }
+    
+    var metricsBadge: some View {
+        HStack(spacing: 4) {
+            // Productive
+            HStack(spacing: 2) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.caption2)
+                Text(formatDuration(productiveDuration))
+                    .fontWeight(.medium)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Color(hex: task.project?.area?.themeColor ?? "")?.opacity(0.2) ?? .blue.opacity(0.2),
+                in: RoundedRectangle(cornerRadius: 6)
+            )
+            .foregroundStyle(Color(hex: task.project?.area?.themeColor ?? "") ?? .blue)
+            
+            // Lost
+            if lostDuration > 0 {
+                HStack(spacing: 2) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                    Text(formatDuration(lostDuration))
+                        .fontWeight(.medium)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    Color.red.opacity(0.1),
+                    in: RoundedRectangle(cornerRadius: 6)
+                )
+                .foregroundStyle(.red)
+            }
+        }
+        .font(.subheadline.monospacedDigit())
+    }
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
@@ -245,15 +290,7 @@ struct TaskThreadRow: View {
             } label: {
                 HStack(spacing: 16) {
                     // Time Badge
-                    Text(formatDuration(totalDuration))
-                        .font(.headline.monospacedDigit())
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            Color(hex: task.project?.area?.themeColor ?? "") ?? .blue,
-                            in: RoundedRectangle(cornerRadius: 6)
-                        )
+                    metricsBadge
                     
                     VStack(alignment: .leading, spacing: 2) {
                         Text(task.title)
@@ -288,35 +325,73 @@ struct TaskThreadRow: View {
                         .background(Color.white.opacity(0.1))
                     
                     ForEach(sessions) { session in
-                        HStack {
-                            Text(session.startTimestamp, style: .time)
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                                .frame(width: 60, alignment: .trailing)
-                            
-                            Text(session.appName)
-                                .font(.caption)
-                            
-                            if let domain = session.browserDomain {
-                                Text("• \(domain)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            
-                            Spacer()
-                            
-                            Text(formatDuration(session.duration))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal)
-                        .padding(.vertical, 8)
-                        .background(Color.white.opacity(0.01))
+                        FocusThreadSessionRow(session: session, isRelevant: task.isRelevant(session))
                     }
                 }
             }
         }
         .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+    }
+    func formatDuration(_ seconds: TimeInterval) -> String {
+        let minutes = Int(seconds / 60)
+        let h = minutes / 60
+        let m = minutes % 60
+        if h > 0 { return "\(h)h \(m)m" }
+        return "\(m)m"
+    }
+}
+
+struct FocusThreadSessionRow: View {
+    let session: Session
+    let isRelevant: Bool
+    
+    var body: some View {
+        HStack {
+            Text(session.startTimestamp, style: .time)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(isRelevant ? .secondary : .tertiary)
+                .frame(width: 60, alignment: .trailing)
+            
+            HStack(spacing: 6) {
+                Text(session.appName)
+                    .font(.caption)
+                    .foregroundStyle(isRelevant ? .primary : .secondary)
+                
+                if let domain = session.browserDomain {
+                    Text("• \(domain)")
+                        .font(.caption)
+                        .foregroundStyle(isRelevant ? .secondary : .tertiary)
+                }
+                
+                if !isRelevant {
+                    // Distraction Indicator
+                    if let project = session.project {
+                        // Belongs to another project
+                        Text("→ \(project.name)")
+                            .font(.caption2)
+                            .padding(.horizontal, 4)
+                            .background(Color(hex: project.area?.themeColor ?? "")?.opacity(0.1) ?? .gray.opacity(0.1))
+                            .foregroundStyle(Color(hex: project.area?.themeColor ?? "") ?? .secondary)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    } else {
+                        // Generic Distraction
+                        Image(systemName: "eye.slash")
+                            .font(.caption2)
+                            .foregroundStyle(.red.opacity(0.6))
+                    }
+                }
+            }
+            
+            Spacer()
+            
+            Text(formatDuration(session.duration))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(isRelevant ? Color.secondary : Color.red.opacity(0.8))
+                .strikethrough(!isRelevant)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(Color.white.opacity(isRelevant ? 0.01 : 0.005))
     }
     
     func formatDuration(_ seconds: TimeInterval) -> String {

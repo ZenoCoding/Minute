@@ -27,17 +27,32 @@ class ClusterEngine {
     /// Domain patterns → task labels
     let domainTaskRules: [(pattern: String, label: String)] = [
         ("github.com", "Coding"),
+        ("gitlab.com", "Coding"),
         ("stackoverflow.com", "Research"),
+        ("developer.apple.com", "Research"),
         ("docs.google.com", "Documents"),
         ("sheets.google.com", "Spreadsheets"),
+        ("slides.google.com", "Presentation"),
         ("figma.com", "Design"),
+        ("canva.com", "Design"),
+        ("dribbble.com", "Design Inspiration"),
+        ("behance.net", "Design Inspiration"),
         ("notion.so", "Notes"),
+        ("asana.com", "Project Management"),
+        ("linear.app", "Project Management"),
+        ("trello.com", "Project Management"),
         ("slack.com", "Communication"),
+        ("discord.com", "Communication"),
         ("mail.google.com", "Email"),
-        ("outlook.com", "Email"),
+        ("outlook.office.com", "Email"),
+        ("outlook.live.com", "Email"),
         ("calendar.google.com", "Scheduling"),
         ("zoom.us", "Meetings"),
         ("meet.google.com", "Meetings"),
+        ("teams.microsoft.com", "Meetings"),
+        ("chatgpt.com", "AI Assistance"),
+        ("claude.ai", "AI Assistance"),
+        ("openai.com", "AI Research"),
     ]
     
     /// App patterns → task labels
@@ -49,7 +64,13 @@ class ClusterEngine {
         ("com.apple.mail", "Email"),
         ("com.apple.iCal", "Scheduling"),
         ("com.figma.Desktop", "Design"),
+        ("com.adobe.Photoshop", "Design"),
+        ("com.adobe.illustrator", "Design"),
         ("com.tinyspeck.slackmacgap", "Communication"),
+        ("com.hnc.Discord", "Communication"),
+        ("us.zoom.xos", "Meeting"),
+        ("com.microsoft.teams", "Meeting"),
+        ("readdle.spark.mac", "Email"),
     ]
     
     // MARK: - Clustering Algorithm

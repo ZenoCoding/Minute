@@ -63,6 +63,7 @@ class TrackerService: ObservableObject {
     func startTracking() {
         print("TrackerService: Started")
         handleAppChange()
+        startHeartbeat()
     }
     
     // MARK: - Task Control
@@ -112,19 +113,26 @@ class TrackerService: ObservableObject {
         guard let orphans = try? modelContext.fetch(descriptor) else { return }
         
         for session in orphans {
-            // Close the session at its last known time
-            let closeTime = session.lastResumedAt ?? session.startTimestamp
-            session.endTimestamp = closeTime.addingTimeInterval(session.accumulatedDuration > 0 ? 0 : 1)
+            // SAFE FALLBACK:
+            // If the app crashed, we don't know when it ended. 
+            // We assume it ended reasonably close to the last checkpoint.
+            // If we have accumulated duration (from heartbeat), we trust that.
+            // If we have a lastResumeAt, we add a small buffer (e.g. 1 min) and close it there.
             
-            // If no accumulated duration, estimate from start
-            if session.accumulatedDuration == 0 {
-                session.accumulatedDuration = session.endTimestamp!.timeIntervalSince(session.startTimestamp)
-            }
+            let lastActive = session.lastResumedAt ?? session.startTimestamp
+            
+            // If it's been incomplete for > 24 hours, it's definitely stale.
+            // But even if it was 5 mins ago, we shouldn't assume it lasted until now.
+            // Let's cap the "lost" segment at 60 seconds (heartbeat interval + buffer).
+            
+            session.accumulatedDuration += 60 // Assume 1 min of life after last checkpoint
+            session.endTimestamp = lastActive.addingTimeInterval(60)
+            session.lastResumedAt = nil
         }
         
         if !orphans.isEmpty {
             try? modelContext.save()
-            print("TrackerService: Closed \(orphans.count) orphaned sessions from previous run")
+            print("TrackerService: Closed \(orphans.count) orphaned sessions from previous run (safely capped)")
         }
     }
     
@@ -139,39 +147,73 @@ class TrackerService: ObservableObject {
     
     private func seedDefaultMappings() {
         let defaults: [(String, ActivityType, Bool)] = [
-            // Focused Work (confident)
+            // --- Focused Work ---
             ("com.apple.dt.Xcode", .focusedWork, false),
+            ("com.microsoft.VSCode", .focusedWork, false),
             ("com.googlecode.iterm2", .focusedWork, false),
             ("com.apple.Terminal", .focusedWork, false),
-            ("com.microsoft.VSCode", .focusedWork, false),
             ("com.sublimetext.4", .focusedWork, false),
             ("com.jetbrains.intellij", .focusedWork, false),
+            ("com.jetbrains.pycharm", .focusedWork, false),
+            ("com.jetbrains.webstorm", .focusedWork, false),
+            ("com.panic.Nova", .focusedWork, false),
+            ("com.github.GitHubClient", .focusedWork, false),
+            ("com.apple.iWork.Pages", .focusedWork, false),
+            ("com.apple.iWork.Keynote", .focusedWork, false),
+            ("com.apple.iWork.Numbers", .focusedWork, false),
+            ("notion.id", .focusedWork, false),
+            ("com.microsoft.Word", .focusedWork, false),
+            ("com.microsoft.Excel", .focusedWork, false),
+            ("com.microsoft.Powerpoint", .focusedWork, false),
+            ("com.figma.Desktop", .focusedWork, false),
+            ("com.adobe.Photoshop", .focusedWork, false),
+            ("com.adobe.illustrator", .focusedWork, false),
+            ("com.adobe.LightroomClassicCC7", .focusedWork, false),
+            ("com.maxon.cinema4d", .focusedWork, false),
+            ("com.blender.blender", .focusedWork, false),
             
-            // Browsers (ambiguous - need extension)
+            // --- Browsers (Ambiguous) ---
             ("com.apple.Safari", .browser, true),
             ("com.google.Chrome", .browser, true),
             ("org.mozilla.firefox", .browser, true),
             ("com.brave.Browser", .browser, true),
             ("company.thebrowser.Browser", .browser, true),
+            ("com.opera.Opera", .browser, true),
+            ("com.microsoft.edgemac", .browser, true),
             
-            // Communication (ambiguous - could be work or social)
+            // --- Communication ---
             ("com.hnc.Discord", .communication, true),
             ("com.tinyspeck.slackmacgap", .communication, true),
             ("com.apple.MobileSMS", .communication, true),
             ("com.apple.mail", .communication, false),
             ("us.zoom.xos", .communication, false),
-            
-            // Entertainment (confident)
+            ("com.microsoft.teams", .communication, false),
+            ("com.telegram.desktop", .communication, true),
+            ("ru.keepcoder.Telegram", .communication, true),
+            ("com.whatsapp.desktop", .communication, true),
+            ("com.apple.iCal", .communication, false), // Scheduling often involves comms
+            ("com.flexibits.fantastical2.mac", .communication, false),
+            ("readdle.spark.mac", .communication, false),
+
+            // --- Entertainment ---
             ("com.spotify.client", .entertainment, false),
             ("com.apple.Music", .entertainment, false),
             ("com.apple.TV", .entertainment, false),
+            ("com.valve.steam", .entertainment, false),
+            ("com.apple.podcasts", .entertainment, false),
             
-            // Admin (confident)
+            // --- Admin / Utilities ---
             ("com.apple.finder", .admin, false),
             ("com.apple.systempreferences", .admin, false),
             ("com.apple.ActivityMonitor", .admin, false),
+            ("com.apple.AppStore", .admin, false),
+            ("com.apple.Notes", .focusedWork, true), // Ambiguous: could be personal list or work notes
+            ("com.apple.reminders", .admin, false),
+            ("com.1password.1password", .admin, false),
+            ("com.raycast.macos", .admin, false),
+            ("com.runningwithcrayons.Alfred", .admin, false),
             
-            // Meta (ignore Minute itself)
+            // --- Meta ---
             ("com.tycho.Minute", .meta, false),
         ]
         
@@ -210,7 +252,85 @@ class TrackerService: ObservableObject {
         
         // Subscribe to browser domain changes
         browserBridge.onDomainChange = { [weak self] oldDomain, newDomain, title in
-            self?.handleDomainChange(from: oldDomain, to: newDomain, title: title)
+            Task { @MainActor [weak self] in
+                self?.handleDomainChange(from: oldDomain, to: newDomain, title: title)
+            }
+        }
+        
+        // --- System Lifecycle Observers ---
+        
+        // Sleep/Wake
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.willSleepNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in self?.handleSleep() }
+            }
+            .store(in: &cancellables)
+            
+        NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in self?.handleWake() }
+            }
+            .store(in: &cancellables)
+            
+        // App Termination
+        NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in self?.handleTermination() }
+            }
+            .store(in: &cancellables)
+    }
+    
+    private func startHeartbeat() {
+        Task { @MainActor [weak self] in
+            while true {
+                // Heartbeat every 30 seconds
+                try? await Task.sleep(for: .seconds(30))
+                guard let self = self else { return }
+                self.saveHeartbeat()
+            }
+        }
+    }
+    
+    // MARK: - Lifecycle Handlers
+    
+    private func handleSleep() {
+        print("TrackerService: System sleeping - pausing tracking")
+        // Close current session to prevent duration accumulating during sleep
+        closeCurrentSession()
+    }
+    
+    private func handleWake() {
+        print("TrackerService: System woke up - resuming tracking")
+        // Trigger app change to pick up whatever is frontmost
+        handleAppChange()
+    }
+    
+    private func handleTermination() {
+        print("TrackerService: App terminating - closing session")
+        closeCurrentSession()
+        do {
+            try modelContext.save()
+        } catch {
+            print("TrackerService: Failed to save on termination: \(error)")
+        }
+    }
+    
+    private func saveHeartbeat() {
+        guard let session = currentSession else { return }
+        
+        // Update accumulated duration without closing
+        let activeStart = session.lastResumedAt ?? session.startTimestamp
+        let currentSegment = Date().timeIntervalSince(activeStart)
+        
+        // We act as if we closed and resumed instantly to checkpoint the duration
+        session.accumulatedDuration += currentSegment
+        session.lastResumedAt = Date()
+        
+        do {
+            try modelContext.save()
+            // print("TrackerService: Heartbeat saved (\(Int(session.accumulatedDuration))s)")
+        } catch {
+            print("TrackerService: Heartbeat save failed: \(error)")
         }
     }
     
@@ -221,6 +341,11 @@ class TrackerService: ObservableObject {
     private func handleDomainChange(from oldDomain: String, to newDomain: String, title: String?) {
         // We received a domain change from the extension, so this IS a browser session
         guard let session = currentSession else { return }
+        
+        // Capture state BEFORE closing (which might delete the session if short)
+        let bundleID = session.bundleID
+        let appName = session.appName
+        let state = session.state
         
         // Close the previous visit
         if let visit = currentBrowserVisit {
@@ -233,10 +358,6 @@ class TrackerService: ObservableObject {
         // SPLIT: Close current session and create new one for the new domain
         // This enables per-domain AI classification
         closeCurrentSession()
-        
-        let bundleID = session.bundleID
-        let appName = session.appName
-        let state = session.state
         
         // Create new session for new domain
         let newSession = Session(
@@ -309,6 +430,12 @@ class TrackerService: ObservableObject {
                 print("TrackerService: Discarding interruption \(pending.appName) for merge")
             }
             pendingSegment = nil
+            
+            // CRITICAL FIX: Close the *current* session (the interruption) before resuming the old one.
+            // If we don't, the current active session becomes a zombie (stays open forever but untracked).
+            if currentSession != nil {
+                closeCurrentSession() 
+            }
             
             mergeTarget.microInterruptions += 1
             mergeTarget.endTimestamp = nil  // Re-open the session
@@ -440,14 +567,14 @@ class TrackerService: ObservableObject {
         
         // Discard very short sessions (< 2 seconds)
         if session.duration < commitThreshold {
+            currentSession = nil // Clear reference first to notify UI
             modelContext.delete(session)
-            currentSession = nil
             print("TrackerService: Discarded short session \(session.appName) (\(String(format: "%.1f", session.duration))s)")
             return
         }
         
         // Add to recent sessions for merge detection (only non-Meta)
-        if session.activityType != .meta {
+        if !session.isDeleted && session.activityType != .meta {
             recentSessions.append((session.bundleID, Date(), session))
         }
         

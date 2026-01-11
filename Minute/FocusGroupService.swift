@@ -31,6 +31,7 @@ class FocusGroupService: ObservableObject {
     
     /// Classify a session and assign to a project or focus group
     func classifySession(_ session: Session, modelContext: ModelContext) async {
+        guard !session.isDeleted else { return }
         guard hasAPIKey else { return }
         
         // Skip if already assigned
@@ -47,7 +48,11 @@ class FocusGroupService: ObservableObject {
             let context = buildSessionContext(session)
             
             // Call AI for classification
-            let result = try await callAI(sessionContext: context, projects: activeProjects)
+            let result = try await callAI(
+                sessionContext: context, 
+                projects: activeProjects, 
+                activeTask: session.task
+            )
             
             // Apply result
             if let projectIndex = result.projectIndex, projectIndex < activeProjects.count {
@@ -111,7 +116,7 @@ class FocusGroupService: ObservableObject {
     }
     
     /// Call Gemini API for classification
-    private func callAI(sessionContext: String, projects: [Project]) async throws -> ClassificationResult {
+    private func callAI(sessionContext: String, projects: [Project], activeTask: TaskItem?) async throws -> ClassificationResult {
         // Build project list for prompt
         var projectList = "None"
         if !projects.isEmpty {
@@ -120,23 +125,50 @@ class FocusGroupService: ObservableObject {
             }.joined(separator: ", ")
         }
         
-        let prompt = """
-        Classify this computer activity into one of the user's active projects.
+        var prompt = ""
         
-        Active Projects: \(projectList)
-        
-        Current activity:
-        \(sessionContext)
-        
-        Reply with JSON: {"task":"Task Name","icon":"sf.symbol","projectIndex":null,"isDistraction":false}
-        
-        Rules:
-        - "projectIndex": The index of the matching Active Project. If it clearly belongs to one, use its index. If it does not match ANY project, return null.
-        - "task": Describe the specific action (e.g. "Debugging", "Writing Report"). If matched to a project, describe the sub-task.
-        - "icon": An SF Symbol name (e.g. "hammer.fill", "doc.text")
-        - "isDistraction": true ONLY for entertainment/social media not related to the project.
-        - IF "Category" is "Focused Work" or "Coding", favor Development/Productivity tasks.
-        """
+        if let task = activeTask {
+            // Validation Mode
+            prompt = """
+            User is focusing on the task: "\(task.title)" (Project: \(task.project?.name ?? "General")).
+            
+            Current Activity:
+            \(sessionContext)
+            
+            Step 1: Is this activity RELEVANT to the active task?
+            Step 2: If NOT relevant, does it belong to a different Active Project?
+            
+            Reply with JSON: {"task":"Description of activity","icon":"sf.symbol","projectIndex":null,"isDistraction":boolean}
+            
+            Rules:
+            - "projectIndex": The index of the *actual* project this activity belongs to.
+              - If it matches the Active Task, use its project index.
+              - If it matches a DIFFERENT project, use that project's index.
+              - If it matches NO project, return null.
+            - "isDistraction": true ONLY if the activity is generic unproductive time (e.g. social media, entertainment, unrelated browsing) that does NOT belong to any project.
+              - If it is productive work for a DIFFERENT project, set isDistraction: false.
+            - "task": Describe what the user is doing.
+            """
+        } else {
+            // Classification Mode
+            prompt = """
+            Classify this computer activity into one of the user's active projects.
+            
+            Active Projects: \(projectList)
+            
+            Current activity:
+            \(sessionContext)
+            
+            Reply with JSON: {"task":"Task Name","icon":"sf.symbol","projectIndex":null,"isDistraction":false}
+            
+            Rules:
+            - "projectIndex": The index of the matching Active Project. If it clearly belongs to one, use its index. If it does not match ANY project, return null.
+            - "task": Describe the specific action (e.g. "Debugging", "Writing Report"). If matched to a project, describe the sub-task.
+            - "icon": An SF Symbol name (e.g. "hammer.fill", "doc.text")
+            - "isDistraction": true ONLY for entertainment/social media not related to the project.
+            - IF "Category" is "Focused Work" or "Coding", favor Development/Productivity tasks.
+            """
+        }
         
         let url = URL(string: "\(baseURL)?key=\(apiKey)")!
         

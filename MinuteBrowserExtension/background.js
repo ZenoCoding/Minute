@@ -185,7 +185,10 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     // Small delay to let content script run
     setTimeout(() => sendTabInfo(tab), 100);
   } catch (error) {
-    console.error("Minute: Error getting activated tab:", error);
+    // Ignore "No tab with id" errors (tab closed quickly)
+    if (!error.message.includes("No tab with id")) {
+      console.error("Minute: Error getting activated tab:", error);
+    }
   }
 });
 

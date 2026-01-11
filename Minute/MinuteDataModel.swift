@@ -245,9 +245,41 @@ enum ProjectStatus: String, Codable {
     @Relationship(deleteRule: .nullify)
     var sessions: [Session] = []
     
-    var timeSpent: TimeInterval {
+    var totalDuration: TimeInterval {
         sessions.reduce(0) { $0 + $1.duration }
     }
+    
+    // Logic: Session is productive if not junk AND belongs to this project (or is general/unsorted)
+    // If it belongs to a DIFFERENT project, it's "Lost Time" for this task.
+    
+    func isRelevant(_ session: Session) -> Bool {
+        if session.isEffectiveDistraction { return false }
+        
+        // If session is assigned to a specific project...
+        if let sessionProject = session.project {
+            // ...it must match this task's project
+            if let taskProject = self.project {
+                return sessionProject.id == taskProject.id
+            }
+            // If task has no project (Inbox task), any productive work counts? 
+            // Or maybe only Unsorted work? Let's assume Inbox tasks accept any project unless explicitly junk.
+            return true 
+        }
+        
+        // Session has no project (Unsorted) -> Count as relevant (benefit of doubt)
+        return true
+    }
+    
+    var productiveDuration: TimeInterval {
+        sessions.filter { isRelevant($0) }.reduce(0) { $0 + $1.duration }
+    }
+    
+    var distractedDuration: TimeInterval {
+        sessions.filter { !isRelevant($0) }.reduce(0) { $0 + $1.duration }
+    }
+    
+    // Legacy alias
+    var timeSpent: TimeInterval { totalDuration }
 
     
     init(title: String, orderIndex: Int = 0, project: Project? = nil, estimatedDuration: TimeInterval? = nil, dueDate: Date? = nil) {
@@ -325,6 +357,18 @@ final class Session {
         self.unknownReason = unknownReason
         self.needsReview = activityType == .unknown || confidence < 0.8
         self.lastResumedAt = nil
+    }
+    
+    var isEffectiveDistraction: Bool {
+        if isGroupDistraction { return true }
+        if activityType.isDistraction { return true }
+        if activityType == .browser {
+            // Check the latest visit
+            if let lastVisit = browserVisits.last {
+                return lastVisit.isDistraction
+            }
+        }
+        return false
     }
     
     var duration: TimeInterval {
