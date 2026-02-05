@@ -9,7 +9,7 @@ struct MinuteApp: App {
     
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
-            Segment.self, Session.self, ActivityLabel.self, AppCategoryRule.self, Cluster.self, DomainRule.self, BrowserVisit.self, FocusGroup.self, Area.self, Project.self, TaskItem.self
+            Segment.self, Session.self, ActivityLabel.self, AppCategoryRule.self, Cluster.self, DomainRule.self, BrowserVisit.self, Area.self, Project.self, TaskItem.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
@@ -26,6 +26,15 @@ struct MinuteApp: App {
                 .environmentObject(calendarManager)
         }
         .modelContainer(sharedModelContainer)
+        .commands {
+            // Add Capture Mode command to File menu
+            CommandGroup(after: .newItem) {
+                Button("Capture Mode") {
+                    NotificationCenter.default.post(name: .showCaptureMode, object: nil)
+                }
+                .keyboardShortcut("j", modifiers: [.command, .shift])
+            }
+        }
         
         MenuBarExtra {
             MenubarView()

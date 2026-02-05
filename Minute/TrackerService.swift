@@ -15,7 +15,7 @@ class TrackerService: ObservableObject {
     private var modelContext: ModelContext
     private var idleMonitor: IdleMonitor
     private var browserBridge: BrowserBridge
-    private var focusGroupService: FocusGroupService
+
     
     // Configuration
     private let commitThreshold: TimeInterval = 2.0  // Don't commit segments shorter than this
@@ -53,7 +53,7 @@ class TrackerService: ObservableObject {
         self.modelContext = modelContext
         self.idleMonitor = IdleMonitor()
         self.browserBridge = BrowserBridge()
-        self.focusGroupService = FocusGroupService()
+
         
         seedDefaultMappings()
         cleanupOrphanedSessions()
@@ -398,11 +398,7 @@ class TrackerService: ObservableObject {
         let snippetInfo = richContext?.contentSnippet != nil ? " (\(richContext!.contentSnippet!.prefix(50))...)" : ""
         print("TrackerService: New browser session for \(newDomain)\(snippetInfo)")
         
-        // Classify into focus group (async)
-        Task { @MainActor in
-            await focusGroupService.classifySession(newSession, modelContext: modelContext)
-        }
-        
+
         try? modelContext.save()
     }
     
@@ -535,12 +531,7 @@ class TrackerService: ObservableObject {
         let domainInfo = session.browserDomain.map { " [\($0)]" } ?? ""
         print("TrackerService: Committed session \(pending.appName) -> \(activityType.rawValue)\(domainInfo)")
         
-        // Classify into focus group (async, non-blocking)
-        if activityType != .meta {
-            Task { @MainActor in
-                await focusGroupService.classifySession(session, modelContext: modelContext)
-            }
-        }
+
     }
     
     private func closeCurrentSession() {

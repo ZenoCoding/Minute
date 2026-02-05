@@ -130,42 +130,7 @@ final class Segment {
     }
 }
 
-// MARK: - FocusGroup (AI-managed task container)
 
-@Model
-final class FocusGroup {
-    var id: UUID = UUID()
-    var name: String                     // "Physics Study", "Vibe Coding"
-    var icon: String?                    // SF Symbol name (e.g. "studentdesk", "laptopcomputer")
-    var date: Date                       // Day this group belongs to
-    var createdAt: Date
-    var lastActiveAt: Date
-    
-    // Sessions in this group
-    @Relationship(deleteRule: .nullify, inverse: \Session.focusGroup)
-    var sessions: [Session] = []
-    
-    init(name: String, icon: String? = nil, date: Date = Date()) {
-        self.name = name
-        self.icon = icon
-        self.date = Calendar.current.startOfDay(for: date)
-        self.createdAt = Date()
-        self.lastActiveAt = Date()
-    }
-    
-    /// Total duration of productive sessions
-    var productiveTime: TimeInterval {
-        sessions.filter { !$0.isGroupDistraction }.reduce(0) { $0 + $1.duration }
-    }
-    
-    /// Total distraction time within this group
-    var distractionTime: TimeInterval {
-        sessions.filter { $0.isGroupDistraction }.reduce(0) { $0 + $1.duration }
-    }
-    
-    /// Session count
-    var sessionCount: Int { sessions.count }
-}
 
 // MARK: - Goals & Tasks System
 
@@ -325,8 +290,7 @@ final class Session {
     var inferredTask: String?           // Suggested task label
     var userTaskLabel: String?          // User-provided task override
     
-    // Focus Group (AI-managed)
-    var focusGroup: FocusGroup?         // Parent focus group
+    // Project link
     var project: Project?               // Link to intentional goal
     var isGroupDistraction: Bool = false // Marked as distraction within group
     

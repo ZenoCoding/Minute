@@ -1053,7 +1053,7 @@ struct ConsolidatedSessionRow: View {
                                 .font(.caption)
                                 .foregroundStyle(session.isGroupDistraction ? .orange : .primary)
                             
-                            if let label = session.focusGroup?.name {
+                            if let label = session.project?.name {
                                 Text("• \(label)")
                                     .font(.caption2)
                                     .foregroundStyle(.blue)

@@ -17,21 +17,41 @@ struct TaskStreamView: View {
     @EnvironmentObject var calendarManager: CalendarManager
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Project.createdAt) private var allProjects: [Project]
-    // 1. Query Tasks directly for reactivity (Active "To Do" items)
-    @Query(filter: #Predicate<TaskItem> { !$0.isCompleted }, sort: \TaskItem.orderIndex)
-    private var allIncompleteTasks: [TaskItem]
+    // Query ALL tasks - filter completion status in code to keep recently completed visible
+    @Query(sort: \TaskItem.orderIndex)
+    private var allTasks: [TaskItem]
     
-    // 2. Filter for only active projects
+    // Filter for active projects + show incomplete OR completed today (if due today or later)
     var streamTasks: [StreamItem] {
-        let activeProjectIDs = Set(allProjects.filter { $0.status == .active }.map { $0.id })
+        let activeProjectIDs: Set<UUID> = Set(allProjects.filter { $0.status == .active }.map { $0.id })
+        let calendar = Calendar.current
+        let todayStart = calendar.startOfDay(for: Date())
         
-        // Filter tasks that belong to active projects
-        let visibleTasks = allIncompleteTasks.filter { task in
-            guard let project = task.project else { return false }
-            return activeProjectIDs.contains(project.id)
+        var visibleTasks: [TaskItem] = []
+        for task in allTasks {
+            guard let project = task.project else { continue }
+            guard activeProjectIDs.contains(project.id) else { continue }
+            
+            if !task.isCompleted {
+                // Show all incomplete tasks
+                visibleTasks.append(task)
+            } else if let completedAt = task.completedAt, completedAt >= todayStart {
+                // Completed today - only show if it was due today or in the future (not overdue)
+                let dueDate = task.dueDate ?? Date()
+                let dueDayStart = calendar.startOfDay(for: dueDate)
+                if dueDayStart >= todayStart {
+                    // Was due today or future - keep visible briefly
+                    visibleTasks.append(task)
+                }
+                // Otherwise it was overdue and completed - hide immediately
+            }
         }
         
-        return visibleTasks.map { StreamItem(task: $0, project: $0.project!) }
+        // Map to StreamItems
+        return visibleTasks.compactMap { task -> StreamItem? in
+            guard let project = task.project else { return nil }
+            return StreamItem(task: task, project: project)
+        }
     }
     
     var body: some View {
@@ -114,6 +134,21 @@ struct TaskStreamView: View {
                                         .font(.headline)
                                         .foregroundStyle(.secondary)
                                     Spacer()
+                                    
+                                    // Total hours for section (incomplete tasks only)
+                                    let totalHours = section.tasks.filter { !$0.task.isCompleted }.reduce(0.0) { sum, item in
+                                        sum + (item.task.estimatedDuration ?? 0)
+                                    } / 3600.0
+                                    
+                                    if totalHours > 0 {
+                                        Text(totalHours.truncatingRemainder(dividingBy: 1) == 0 ? "\(Int(totalHours))h" : String(format: "%.1fh", totalHours))
+                                            .font(.caption)
+                                            .foregroundStyle(.tertiary)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.blue.opacity(0.1), in: Capsule())
+                                    }
+                                    
                                     Text("\(section.tasks.count)")
                                         .font(.caption)
                                         .foregroundStyle(.tertiary)
@@ -126,14 +161,14 @@ struct TaskStreamView: View {
                                 
                                 // Tasks
                                 ForEach(section.tasks) { item in
-                                    TaskStreamRow(item: item, onEdit: { editingTask = item.task })
+                                    TaskStreamRow(item: item, activeProjects: allProjects.filter { $0.status == .active }, onEdit: { editingTask = item.task })
                                         .transition(.move(edge: .top).combined(with: .opacity))
                                         .opacity(draggedTask?.id == item.task.id ? 0.0 : 1.0)
                                         .onDrag {
                                             self.draggedTask = item.task
                                             return NSItemProvider(object: item.task.id.uuidString as NSString)
                                         } preview: {
-                                            TaskStreamRow(item: item, onEdit: {})
+                                            TaskStreamRow(item: item, activeProjects: allProjects.filter { $0.status == .active }, onEdit: {})
                                                 .frame(width: 350)
                                                 .background(.regularMaterial)
                                                 .cornerRadius(12)
@@ -167,7 +202,7 @@ struct TaskStreamView: View {
                 }
             }
             .onAppear(perform: syncTasks)
-            .onChange(of: allIncompleteTasks) { _, _ in
+            .onChange(of: allTasks) { _, _ in
                 withAnimation { syncTasks() }
             }
             .onChange(of: allProjects) { _, _ in
@@ -209,16 +244,12 @@ struct TaskStreamView: View {
     }
     
     private func syncTasks() {
-        // 1. Calculate the target set of tasks based on active projects query
-        let activeProjectIDs = Set(allProjects.filter { $0.status == .active }.map { $0.id })
-        
-        let targetTasks = allIncompleteTasks.filter { task in
-            guard let project = task.project else { return false }
-            return activeProjectIDs.contains(project.id)
+        // Use streamTasks which already filters for active projects + incomplete/recently completed
+        let targetTasks = streamTasks.map { $0.task }.sorted { $0.orderIndex < $1.orderIndex }
+        let targetItems = targetTasks.compactMap { task -> StreamItem? in
+            guard let project = task.project else { return nil }
+            return StreamItem(task: task, project: project)
         }
-        .sorted { $0.orderIndex < $1.orderIndex }
-        
-        let targetItems = targetTasks.map { StreamItem(task: $0, project: $0.project!) }
         
         // 2. Intelligence Merge to preserve local drag state if possible? 
         // Actually, if we just overwrite, we lose the "mid-drag" state if an update happens mid-drag.
@@ -258,20 +289,31 @@ struct TaskStreamView: View {
         let tasks: [StreamItem]
     }
     
+    /// Sort helper: incomplete tasks first, then completed tasks
+    private func sortWithCompletedLast(_ items: [StreamItem]) -> [StreamItem] {
+        let incomplete = items.filter { !$0.task.isCompleted }
+        let completed = items.filter { $0.task.isCompleted }
+        return incomplete + completed
+    }
+    
     var sections: [StreamSection] {
         var today: [StreamItem] = []
+        var tomorrow: [StreamItem] = []
         var week: [StreamItem] = []
         var backlog: [StreamItem] = []
         
         let calendar = Calendar.current
         let now = Date()
         let todayEnd = calendar.startOfDay(for: now).addingTimeInterval(86400)
+        let tomorrowEnd = calendar.startOfDay(for: now).addingTimeInterval(86400 * 2)
         let weekEnd = calendar.date(byAdding: .day, value: 7, to: now)!
         
         for item in orderedTasks {
             if let date = item.task.dueDate {
                 if date < todayEnd {
                     today.append(item)
+                } else if date < tomorrowEnd {
+                    tomorrow.append(item)
                 } else if date < weekEnd {
                     week.append(item)
                 } else {
@@ -282,16 +324,18 @@ struct TaskStreamView: View {
             }
         }
         
-        // Sort future sections by date
+        // Sort "This Week" by due date first
         week.sort { ($0.task.dueDate ?? .distantFuture) < ($1.task.dueDate ?? .distantFuture) }
-        backlog.sort {
-            let d1 = $0.task.dueDate ?? .distantFuture
-            let d2 = $1.task.dueDate ?? .distantFuture
-            return d1 < d2
-        }
+        
+        // Sort completed tasks to bottom within each section
+        today = sortWithCompletedLast(today)
+        tomorrow = sortWithCompletedLast(tomorrow)
+        week = sortWithCompletedLast(week)
+        backlog = sortWithCompletedLast(backlog)
         
         var result: [StreamSection] = []
         if !today.isEmpty { result.append(StreamSection(title: "Today", tasks: today)) }
+        if !tomorrow.isEmpty { result.append(StreamSection(title: "Tomorrow", tasks: tomorrow)) }
         if !week.isEmpty { result.append(StreamSection(title: "This Week", tasks: week)) }
         if !backlog.isEmpty { result.append(StreamSection(title: "Backlog", tasks: backlog)) }
         
@@ -781,10 +825,22 @@ struct StreamItem: Identifiable {
 
 struct TaskStreamRow: View {
     let item: StreamItem
+    let activeProjects: [Project]
     let onEdit: () -> Void
     @EnvironmentObject var tracker: TrackerService
     @Environment(\.modelContext) private var modelContext
+    
     @State private var isHovering = false
+    
+    // Inline Editing State
+    @State private var isEditingTitle = false
+    @State private var editedTitle: String = ""
+    @State private var showProjectPicker = false
+    @State private var showDatePicker = false
+    @State private var showDurationPicker = false
+    @State private var showRecurrencePicker = false
+    
+    @FocusState private var titleFieldFocused: Bool
     
     var projectColor: Color {
         Color(hex: item.project.area?.themeColor ?? "8E8E93") ?? .gray
@@ -820,136 +876,163 @@ struct TaskStreamRow: View {
     
     var body: some View {
         HStack(spacing: 12) {
-
-            
             // Checkbox (Completion)
             Button(action: {
-                // Optimistic UI update
                 withAnimation(.snappy) {
                     isCompleting = true
                 }
-                
-                // If completing active task, stop first
                 if isActive { tracker.stopCurrentTask() }
-                
-                // Delay actual data deletion to let animation play
+                // Capture task reference before async delay
+                let taskToComplete = item.task
+                let context = modelContext
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                     withAnimation {
-                        item.task.isCompleted = true
-                        item.task.completedAt = Date()
+                        taskToComplete.isCompleted = true
+                        taskToComplete.completedAt = Date()
+                    }
+                    // Explicit save to ensure persistence
+                    do {
+                        try context.save()
+                    } catch {
+                        print("Failed to save task completion: \(error)")
                     }
                 }
             }) {
-                Image(systemName: isCompleting ? "checkmark.circle.fill" : "circle")
+                let isChecked = isCompleting || item.task.isCompleted
+                Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
                    .font(.system(size: 18))
-                   .foregroundStyle(isCompleting ? .green : .secondary)
+                   .foregroundStyle(isChecked ? .green : .secondary)
             }
             .buttonStyle(.plain)
             
             // Content
-            VStack(alignment: .leading, spacing: 2) {
-                Text(item.task.title)
-                    .font(.body)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
-                    .strikethrough(isCompleting)
-                    .foregroundStyle(isCompleting ? .secondary : .primary)
-                
-                
-                HStack(spacing: 8) {
-                    HStack(spacing: 6) {
-                        if let icon = item.project.area?.iconName {
-                            Image(systemName: icon)
-                                .font(.caption2)
+            VStack(alignment: .leading, spacing: 4) {
+                // Editable Title
+                if isEditingTitle {
+                    TextField("Task name", text: $editedTitle)
+                        .textFieldStyle(.plain)
+                        .font(.body)
+                        .fontWeight(.medium)
+                        .focused($titleFieldFocused)
+                        .onSubmit {
+                            saveTitle()
                         }
-                        Text(item.project.name)
-                            .font(.caption)
-                            .lineLimit(1)
+                        .onExitCommand {
+                            cancelTitleEdit()
+                        }
+                } else {
+                    Text(item.task.title)
+                        .font(.body)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+                        .strikethrough(isCompleting || item.task.isCompleted)
+                        .foregroundStyle((isCompleting || item.task.isCompleted) ? .secondary : .primary)
+                        .onTapGesture {
+                            startTitleEdit()
+                        }
+                }
+                
+                // Editable Metadata Row
+                HStack(spacing: 6) {
+                    // Project Badge (Editable)
+                    EditableBadge(showPopover: $showProjectPicker) {
+                        HStack(spacing: 4) {
+                            if let icon = item.project.area?.iconName {
+                                Image(systemName: icon)
+                                    .font(.caption2)
+                            }
+                            Text(item.project.name)
+                                .font(.caption)
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(projectColor)
+                    } popover: {
+                        ProjectPickerPopover(
+                            projects: activeProjects,
+                            selection: .constant(item.task.project)
+                        ) { project in
+                            item.task.project = project
+                            showProjectPicker = false
+                        }
                     }
-                    .foregroundStyle(projectColor)
                     
-                    // Metadata Badges
-                    if let duration = item.task.estimatedDuration {
+                    // Duration Badge (Editable)
+                    EditableBadge(showPopover: $showDurationPicker) {
                         HStack(spacing: 2) {
                             Image(systemName: "hourglass")
-                            Text(formatDuration(duration))
+                            if let duration = item.task.estimatedDuration {
+                                Text(formatDuration(duration))
+                            } else {
+                                Text("—")
+                                    .foregroundStyle(.tertiary)
+                            }
                         }
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                        .opacity(item.task.estimatedDuration != nil ? 1.0 : 0.5)
+                    } popover: {
+                        DurationPickerPopover(
+                            selection: Binding(
+                                get: { item.task.estimatedDuration },
+                                set: { item.task.estimatedDuration = $0 }
+                            ),
+                            isPresented: $showDurationPicker
+                        )
                     }
                     
-                    if let date = item.task.dueDate {
+                    // Date Badge (Editable)
+                    EditableBadge(showPopover: $showDatePicker) {
                         HStack(spacing: 2) {
                             Image(systemName: "calendar")
-                            Text(formatDate(date))
+                            if let date = item.task.dueDate {
+                                Text(formatDate(date))
+                                    .foregroundStyle(isOverdue(date) ? .red : .secondary)
+                            } else {
+                                Text("—")
+                                    .foregroundStyle(.tertiary)
+                            }
                         }
                         .font(.caption2)
-                        .foregroundStyle(isOverdue(date) ? .red : .secondary)
+                        .foregroundStyle(.secondary)
+                        .opacity(item.task.dueDate != nil ? 1.0 : 0.5)
+                    } popover: {
+                        DatePickerPopover(
+                            selection: Binding(
+                                get: { item.task.dueDate },
+                                set: { item.task.dueDate = $0 }
+                            ),
+                            isPresented: $showDatePicker
+                        )
                     }
-
                     
-                    if item.task.isRecurring {
-                        Image(systemName: "repeat")
-                            .font(.caption2)
-                            .foregroundStyle(.blue)
+                    // Recurrence Badge (Editable)
+                    EditableBadge(showPopover: $showRecurrencePicker) {
+                        HStack(spacing: 2) {
+                            Image(systemName: "repeat")
+                            if item.task.isRecurring, let interval = item.task.recurrenceInterval {
+                                Text(interval.capitalized)
+                            }
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(item.task.isRecurring ? AnyShapeStyle(.blue) : AnyShapeStyle(.tertiary))
+                    } popover: {
+                        RecurrencePickerPopover(
+                            isRecurring: Binding(
+                                get: { item.task.isRecurring },
+                                set: { item.task.isRecurring = $0 }
+                            ),
+                            recurrenceInterval: Binding(
+                                get: { item.task.recurrenceInterval },
+                                set: { item.task.recurrenceInterval = $0 }
+                            ),
+                            isPresented: $showRecurrencePicker
+                        )
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle()) // Clickable area for drag
-            // We expose drag here so the checkbox remains clickable without conflict
-            .onDrag {
-                // We need a way to bubble this up or handle it. 
-                // Since TaskStreamRow is inside ForEach with onDrag, 
-                // we can't easily move onDrag INSIDE without changing the ForEach logic.
-                // Reverting approach: Use ButtonStyle Primitive.
-                return NSItemProvider()
-            }
-            
-            Spacer()
-            
-            // Hover Actions
-            if isHovering {
-                HStack(spacing: 0) {
-                    // Play Button
-                    Button(action: {
-                        if isActive {
-                            tracker.stopCurrentTask()
-                        } else {
-                            tracker.startTask(item.task)
-                        }
-                    }) {
-                         Image(systemName: isActive ? "pause.fill" : "play.fill")
-                            .font(.system(size: 14))
-                            .foregroundStyle(isActive ? Color.accentColor : .secondary)
-                            .padding(6)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(isActive ? "Pause" : "Start")
-
-                    Menu {
-                        Button("Edit Task...") { onEdit() }
-                        Divider()
-                        Button("Delete", role: .destructive) {
-                            withAnimation {
-                                modelContext.delete(item.task)
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .font(.system(size: 16))
-                            .foregroundStyle(.secondary)
-                            .padding(6)
-                            .contentShape(Rectangle())
-                    }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                }
-                .transition(.opacity)
-            }
         }
-        .padding(.vertical, 8) // List-style padding
+        .padding(.vertical, 8)
         .padding(.horizontal, 12)
         .overlay(
             Rectangle()
@@ -963,11 +1046,17 @@ struct TaskStreamRow: View {
         .onHover { hover in
             isHovering = hover
         }
+        .onChange(of: titleFieldFocused) { _, focused in
+            if !focused && isEditingTitle {
+                saveTitle()
+            }
+        }
         .onTapGesture(count: 2) {
             onEdit()
         }
         .contextMenu {
             Button("Edit Task...") { onEdit() }
+            Button("Rename") { startTitleEdit() }
             Divider()
             Button("Delete", role: .destructive) {
                 withAnimation {
@@ -975,6 +1064,28 @@ struct TaskStreamRow: View {
                 }
             }
         }
+    }
+    
+    // MARK: - Title Editing
+    
+    private func startTitleEdit() {
+        editedTitle = item.task.title
+        isEditingTitle = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            titleFieldFocused = true
+        }
+    }
+    
+    private func saveTitle() {
+        let trimmed = editedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            item.task.title = trimmed
+        }
+        isEditingTitle = false
+    }
+    
+    private func cancelTitleEdit() {
+        isEditingTitle = false
     }
 }
 

@@ -11,7 +11,7 @@ import SwiftData
 struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var allSessions: [Session]
-    @Query private var allFocusGroups: [FocusGroup]
+
     
     @State private var showClearTodayConfirm = false
     @State private var showClearAllConfirm = false
@@ -191,20 +191,14 @@ struct SettingsView: View {
     
     func clearTodaySessions() {
         let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
         let todaySessions = allSessions.filter { calendar.isDateInToday($0.startTimestamp) }
-        let todayGroups = allFocusGroups.filter { $0.date >= today }
         
         for session in todaySessions {
             modelContext.delete(session)
         }
         
-        for group in todayGroups {
-            modelContext.delete(group)
-        }
-        
         try? modelContext.save()
-        clearMessage = "Cleared \(todaySessions.count) sessions and \(todayGroups.count) focus groups"
+        clearMessage = "Cleared \(todaySessions.count) sessions"
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             clearMessage = nil
@@ -213,18 +207,13 @@ struct SettingsView: View {
     
     func clearAllSessions() {
         let sessionCount = allSessions.count
-        let groupCount = allFocusGroups.count
         
         for session in allSessions {
             modelContext.delete(session)
         }
         
-        for group in allFocusGroups {
-            modelContext.delete(group)
-        }
-        
         try? modelContext.save()
-        clearMessage = "Cleared \(sessionCount) sessions and \(groupCount) focus groups"
+        clearMessage = "Cleared \(sessionCount) sessions"
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             clearMessage = nil

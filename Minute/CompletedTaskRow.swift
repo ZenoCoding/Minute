@@ -26,6 +26,7 @@ struct CompletedTaskRow: View {
                     item.task.isCompleted = false
                     item.task.completedAt = nil
                 }
+                try? modelContext.save()
             }) {
                 ZStack {
                     Circle()

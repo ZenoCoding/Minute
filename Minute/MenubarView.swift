@@ -121,7 +121,18 @@ struct MenubarView: View {
             // Footer
             Divider().opacity(0.3)
             HStack {
+                Button {
+                    NotificationCenter.default.post(name: .showCaptureMode, object: nil)
+                } label: {
+                    Label("Capture", systemImage: "plus.circle")
+                }
+                .buttonStyle(.plain)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(8)
+                
                 Spacer()
+                
                 Button("Quit") {
                     NSApplication.shared.terminate(nil)
                 }
