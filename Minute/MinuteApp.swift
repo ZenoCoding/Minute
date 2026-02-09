@@ -9,7 +9,7 @@ struct MinuteApp: App {
     
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
-            Segment.self, Session.self, ActivityLabel.self, AppCategoryRule.self, Cluster.self, DomainRule.self, BrowserVisit.self, Area.self, Project.self, TaskItem.self
+            Area.self, Project.self, TaskItem.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 

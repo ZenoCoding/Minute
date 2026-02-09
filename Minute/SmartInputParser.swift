@@ -18,34 +18,87 @@ struct SmartInputParser {
         let isRecurring: Bool
         let recurrenceInterval: String?
     }
+
+    struct ComposerResult: Sendable {
+        let cleanTitle: String
+        let projectName: String?
+        let duration: TimeInterval?
+        let date: Date?
+        let recurrenceInterval: String?
+    }
+
+    private struct CoreResult: Sendable {
+        let cleanTitle: String
+        let projectName: String?
+        let duration: TimeInterval?
+        let date: Date?
+        let recurrenceInterval: String?
+    }
+
+    // Cache expensive resources used across parses.
+    private static let englishEmbedding = NLEmbedding.wordEmbedding(for: .english)
+    private static let durationRegex = try? NSRegularExpression(
+        pattern: #"(\b\d+(?:\.\d+)?)\s*(h(?:ours?|rs?)?|m(?:in(?:utes?)?s?)?)\b"#,
+        options: .caseInsensitive
+    )
+    private static let dateDetector = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.date.rawValue
+    )
+    private static let dayOfMonthRegex = try? NSRegularExpression(
+        pattern: #"\b(\d+)(?:st|nd|rd|th)\b"#,
+        options: .caseInsensitive
+    )
     
     /// Parses the raw input text to find a matching project and duration.
     /// - Parameters:
     ///   - text: The raw input string (e.g. "Draft report for Marketing 2h")
     ///   - projects: List of candidate projects.
     /// - Returns: A Result containing the inferred project, duration, and the "clean" title (optional).
-    /// Parses the raw input text to find a matching project and duration.
-    /// - Parameters:
-    ///   - text: The raw input string (e.g. "Draft report for Marketing 2h")
-    ///   - projects: List of candidate projects.
-    /// - Returns: A Result containing the inferred project, duration, and the "clean" title (optional).
     static func parse(text: String, projects: [Project]) -> Result {
+        let projectNames = projects.map(\.name)
+        let core = parseCore(text: text, projectNames: projectNames)
+        let matchedProject = core.projectName.flatMap { name in
+            projects.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        }
+
+        return Result(
+            cleanTitle: core.cleanTitle,
+            project: matchedProject,
+            duration: core.duration,
+            date: core.date,
+            isRecurring: core.recurrenceInterval != nil,
+            recurrenceInterval: core.recurrenceInterval
+        )
+    }
+
+    static func parseForComposer(text: String, projectNames: [String]) -> ComposerResult {
+        let core = parseCore(text: text, projectNames: projectNames)
+        return ComposerResult(
+            cleanTitle: core.cleanTitle,
+            projectName: core.projectName,
+            duration: core.duration,
+            date: core.date,
+            recurrenceInterval: core.recurrenceInterval
+        )
+    }
+
+    private static func parseCore(text: String, projectNames: [String]) -> CoreResult {
         var remainingText = text
-        var foundProject: Project?
+        var foundProjectName: String?
         var foundDuration: TimeInterval?
         
         let lowerText = text.lowercased()
         
         // 0. Prepare Candidates
-        let sortedProjects = projects.sorted { $0.name.count > $1.name.count }
+        let sortedProjectNames = projectNames.sorted { $0.count > $1.count }
         
         // 1. Exact Substring Match (Highest Confidence)
         // "Update Marketing stats" -> Matches "Marketing"
-        if foundProject == nil {
-            for project in sortedProjects {
-                let pName = project.name.lowercased()
+        if foundProjectName == nil {
+            for projectName in sortedProjectNames {
+                let pName = projectName.lowercased()
                 if lowerText.contains(pName) {
-                    foundProject = project
+                    foundProjectName = projectName
                     break
                 }
             }
@@ -53,66 +106,67 @@ struct SmartInputParser {
         
         // 2. Token Intersection Match (Medium Confidence)
         // "Minute bug" -> Matches "Minute App" (intersection: "minute")
-        if foundProject == nil {
+        if foundProjectName == nil {
             let inputTokens = Set(lowerText.components(separatedBy: .whitespacesAndNewlines).filter { $0.count > 2 })
             
             // Find project with highest token overlap
-            var bestMatch: Project?
+            var bestMatch: String?
             var maxOverlap = 0
             
-            for project in sortedProjects {
-                let pTokens = Set(project.name.lowercased().components(separatedBy: .whitespacesAndNewlines).filter { $0.count > 2 })
+            for projectName in sortedProjectNames {
+                let pTokens = Set(projectName.lowercased().components(separatedBy: .whitespacesAndNewlines).filter { $0.count > 2 })
                 let overlap = inputTokens.intersection(pTokens).count
                 
                 if overlap > maxOverlap {
                     maxOverlap = overlap
-                    bestMatch = project
+                    bestMatch = projectName
                 }
             }
             
             if maxOverlap > 0 {
-                foundProject = bestMatch
+                foundProjectName = bestMatch
             }
         }
         
         // 2.5. Prefix/Abbreviation Match (Medium-Low Confidence)
         // "Chem" -> Matches "Chemistry"
-        if foundProject == nil {
+        if foundProjectName == nil {
             let inputTokens = lowerText.components(separatedBy: .whitespacesAndNewlines).filter { $0.count >= 2 } // Allow 2 chars like "CS"
             
-            for project in sortedProjects {
-                let pTokens = project.name.lowercased().components(separatedBy: .whitespacesAndNewlines)
+            for projectName in sortedProjectNames {
+                let pTokens = projectName.lowercased().components(separatedBy: .whitespacesAndNewlines)
                 
                 // Check if ANY input token is a prefix of ANY project token
                 // e.g. input "chem", project "chemistry" -> match
                 for iToken in inputTokens {
                     for pToken in pTokens {
                         if pToken.hasPrefix(iToken) {
-                            foundProject = project
+                            foundProjectName = projectName
                             break
                         }
                     }
-                    if foundProject != nil { break }
+                    if foundProjectName != nil { break }
                 }
-                if foundProject != nil { break }
+                if foundProjectName != nil { break }
             }
         }
         
         // 3. Semantic Match via Embeddings (Low Confidence / Concept Match)
         // "Advertise" -> Matches "Marketing"
-        if foundProject == nil, let embedding = NLEmbedding.wordEmbedding(for: .english) {
+        // Skip semantic matching for very short inputs to reduce parse cost while typing.
+        if foundProjectName == nil, lowerText.count > 5, let embedding = englishEmbedding {
             var bestDistance: Double = 2.0
-            var bestSemanticMatch: Project?
+            var bestSemanticMatch: String?
             
             let words = lowerText.components(separatedBy: .whitespacesAndNewlines).filter { $0.count > 3 }
             
             for word in words {
-                for project in projects {
+                for projectName in sortedProjectNames {
                     // Check Levenshtein distance first (Typos)
                     // "Mrketing" -> "Marketing"
-                    let pName = project.name.lowercased()
+                    let pName = projectName.lowercased()
                     if levenshtein(a: word, b: pName) <= 2 && pName.count > 4 {
-                        foundProject = project
+                        foundProjectName = projectName
                         break
                     }
                     
@@ -122,25 +176,26 @@ struct SmartInputParser {
                         let distance = embedding.distance(between: word, and: pWord)
                         if distance < 0.8 && distance < bestDistance {
                             bestDistance = distance
-                            bestSemanticMatch = project
+                            bestSemanticMatch = projectName
                         }
                     }
                 }
-                if foundProject != nil { break }
+                if foundProjectName != nil { break }
             }
             
-            if foundProject == nil, let match = bestSemanticMatch {
-                foundProject = match
+            if foundProjectName == nil, let match = bestSemanticMatch {
+                foundProjectName = match
             }
         }
-        
+
         // 4. Detect Duration (Regex)
-        // Improved to handle "hrs", "mins" and slight variations
-        // Matches: 2h, 2.5hrs, 30m, 30mins, 45 minute
-        let durationPattern = #"(\b\d+(?:\.\d+)?)\s*(h(?:ours?|rs?)?|m(?:in(?:utes?)?s?)?)\b"#
-        
-        if let regex = try? NSRegularExpression(pattern: durationPattern, options: .caseInsensitive) {
-            let matches = regex.matches(in: remainingText, range: NSRange(remainingText.startIndex..., in: remainingText))
+        // Improved to handle "hrs", "mins" and slight variations.
+        // Matches: 2h, 2.5hrs, 30m, 30mins, 45 minute.
+        if let regex = durationRegex {
+            let matches = regex.matches(
+                in: remainingText,
+                range: NSRange(remainingText.startIndex..., in: remainingText)
+            )
             
             if let match = matches.last {
                 if let valRange = Range(match.range(at: 1), in: remainingText),
@@ -166,10 +221,10 @@ struct SmartInputParser {
         }
         
         // 5. Detect Date (NSDataDetector)
-        // Matches: "tomorrow", "next friday", "Jan 5th", "at 5pm"
+        // Matches: "tomorrow", "next friday", "Jan 5th", "at 5pm".
         var foundDate: Date?
         
-        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue) {
+        if let detector = dateDetector {
             // Fix: "due Friday" is often misparsed by NSDataDetector as "Today".
             // Fix: also strip "on", "the" to help clean up "due on the 12th"
             let dateText = remainingText.replacingOccurrences(of: #"due\s+(?:on\s+)?(?:the\s+)?"#, with: "", options: [.regularExpression, .caseInsensitive])
@@ -193,9 +248,11 @@ struct SmartInputParser {
                 }
             } else {
                 // Fallback: Check for "12th", "5th" (NSDataDetector often misses these without Month)
-                let dayPattern = #"\b(\d+)(?:st|nd|rd|th)\b"#
-                if let regex = try? NSRegularExpression(pattern: dayPattern, options: .caseInsensitive) {
-                     let dayMatches = regex.matches(in: dateText, range: NSRange(dateText.startIndex..., in: dateText))
+                if let regex = dayOfMonthRegex {
+                     let dayMatches = regex.matches(
+                        in: dateText,
+                        range: NSRange(dateText.startIndex..., in: dateText)
+                    )
                      if let dayMatch = dayMatches.last, let range = Range(dayMatch.range(at: 1), in: dateText), let day = Int(dateText[range]) {
                          // Find next occurrence of this day
                          let today = Date()
@@ -246,7 +303,13 @@ struct SmartInputParser {
             }
         }
         
-        return Result(cleanTitle: remainingText, project: foundProject, duration: foundDuration, date: foundDate, isRecurring: foundRecurrence != nil, recurrenceInterval: foundRecurrence)
+        return CoreResult(
+            cleanTitle: remainingText,
+            projectName: foundProjectName,
+            duration: foundDuration,
+            date: foundDate,
+            recurrenceInterval: foundRecurrence
+        )
     }
     
     // MARK: - Helpers

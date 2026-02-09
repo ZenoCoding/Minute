@@ -31,6 +31,7 @@ struct FullScreenCaptureView: View {
     @State private var selectedDate: Date?
     @State private var selectedDuration: TimeInterval?
     @State private var selectedRecurrence: String?
+    @State private var parseTask: Task<Void, Never>?
     
     // Pickers
     @State private var showDatePicker = false
@@ -65,6 +66,12 @@ struct FullScreenCaptureView: View {
     var effectiveDate: Date? {
         selectedDate ?? detectedDate
     }
+
+    private static let fullDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE, MMM d"
+        return formatter
+    }()
     
     var body: some View {
         ZStack {
@@ -123,10 +130,33 @@ struct FullScreenCaptureView: View {
                                     createTask()
                                 }
                                 .onChange(of: text) { _, newValue in
+                                    parseTask?.cancel()
                                     if newValue.isEmpty {
                                         resetComposer()
                                     } else {
-                                        parseInput(newValue)
+                                        let inputSnapshot = newValue
+                                        let projectNames = activeProjects.map(\.name)
+                                        parseTask = Task {
+                                            try? await Task.sleep(for: .milliseconds(120))
+                                            guard !Task.isCancelled else { return }
+
+                                            let result = await Task.detached(priority: .userInitiated) {
+                                                SmartInputParser.parseForComposer(text: inputSnapshot, projectNames: projectNames)
+                                            }.value
+                                            guard !Task.isCancelled else { return }
+
+                                            await MainActor.run {
+                                                guard text == inputSnapshot else { return }
+                                                detectedProject = result.projectName.flatMap { matchedName in
+                                                    activeProjects.first {
+                                                        $0.name.caseInsensitiveCompare(matchedName) == .orderedSame
+                                                    }
+                                                }
+                                                detectedDuration = result.duration
+                                                detectedDate = result.date
+                                                detectedRecurrence = result.recurrenceInterval
+                                            }
+                                        }
                                     }
                                 }
                         }
@@ -187,6 +217,9 @@ struct FullScreenCaptureView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 isInputFocused = true
             }
+        }
+        .onDisappear {
+            parseTask?.cancel()
         }
     }
     
@@ -346,14 +379,6 @@ struct FullScreenCaptureView: View {
         text = ""
     }
     
-    private func parseInput(_ input: String) {
-        let result = SmartInputParser.parse(text: input, projects: activeProjects)
-        detectedProject = result.project
-        detectedDuration = result.duration
-        detectedDate = result.date
-        detectedRecurrence = result.recurrenceInterval
-    }
-    
     private func resetComposer() {
         detectedProject = nil
         detectedDuration = nil
@@ -369,9 +394,7 @@ struct FullScreenCaptureView: View {
         let calendar = Calendar.current
         if calendar.isDateInToday(date) { return "Today" }
         if calendar.isDateInTomorrow(date) { return "Tomorrow" }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "EEE, MMM d"
-        return formatter.string(from: date)
+        return Self.fullDateFormatter.string(from: date)
     }
     
     private func isToday(_ date: Date) -> Bool {

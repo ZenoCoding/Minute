@@ -221,19 +221,17 @@ struct ProjectDetailCard: View {
     let project: Project
     let themeColor: Color
     
-    // Computed property for progress simulation
-    // Real implementation would calculate this from project.sessions
-    var timeTracked: TimeInterval {
-        project.sessions.reduce(0) { $0 + $1.duration }
+    var totalTasks: Int {
+        project.tasks.count
     }
     
-    var goal: TimeInterval? {
-        project.weeklyGoalSeconds
+    var completedTasks: Int {
+        project.tasks.filter { $0.isCompleted }.count
     }
     
     var progress: Double {
-        guard let goal = goal, goal > 0 else { return 0 }
-        return min(timeTracked / goal, 1.0)
+        guard totalTasks > 0 else { return 0 }
+        return Double(completedTasks) / Double(totalTasks)
     }
     
     var body: some View {
@@ -275,15 +273,15 @@ struct ProjectDetailCard: View {
                 .foregroundStyle(.secondary)
             }
             
-            if let goal = goal {
-                 VStack(spacing: 6) {
+            if totalTasks > 0 {
+                VStack(spacing: 6) {
                     ProgressView(value: progress)
                         .tint(themeColor)
                     
                     HStack {
-                        Text(formatDuration(timeTracked))
+                        Text("\(completedTasks) / \(totalTasks) tasks complete")
                         Spacer()
-                        Text("Goal: \(formatDuration(goal))")
+                        Text("\(Int(progress * 100))%")
                     }
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -291,8 +289,8 @@ struct ProjectDetailCard: View {
                 }
             } else {
                 HStack {
-                    Image(systemName: "clock")
-                    Text(formatDuration(timeTracked))
+                    Image(systemName: "tray")
+                    Text("No tasks yet")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -307,13 +305,4 @@ struct ProjectDetailCard: View {
         )
     }
     
-    func formatDuration(_ seconds: TimeInterval) -> String {
-        let hours = Int(seconds) / 3600
-        let minutes = (Int(seconds) % 3600) / 60
-        if hours > 0 {
-            return "\(hours)h \(minutes)m"
-        } else {
-            return "\(minutes)m"
-        }
-    }
 }

@@ -10,10 +10,11 @@ import SwiftData
 
 struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query private var allSessions: [Session]
-
+    @Query private var allTasks: [TaskItem]
+    @Query private var allProjects: [Project]
+    @Query private var allAreas: [Area]
     
-    @State private var showClearTodayConfirm = false
+    @State private var showClearCompletedConfirm = false
     @State private var showClearAllConfirm = false
     @State private var clearMessage: String?
     
@@ -23,8 +24,6 @@ struct SettingsView: View {
                 header
                 
                 dataManagementSection
-                
-                statsSection
                 
                 aboutSection
                 
@@ -55,29 +54,29 @@ struct SettingsView: View {
                 .font(.headline)
             
             VStack(spacing: 12) {
-                // Clear Today
+                // Clear Completed
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Clear Today's Sessions")
+                        Text("Clear Completed Tasks")
                             .font(.body)
-                        Text("Remove all sessions from today")
+                        Text("Remove all completed tasks")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     
                     Spacer()
                     
-                    Button("Clear Today") {
-                        showClearTodayConfirm = true
+                    Button("Clear Completed") {
+                        showClearCompletedConfirm = true
                     }
                     .buttonStyle(.bordered)
-                    .confirmationDialog("Clear Today's Sessions?", isPresented: $showClearTodayConfirm) {
-                        Button("Clear Today", role: .destructive) {
-                            clearTodaySessions()
+                    .confirmationDialog("Clear completed tasks?", isPresented: $showClearCompletedConfirm) {
+                        Button("Clear Completed", role: .destructive) {
+                            clearCompletedTasks()
                         }
                         Button("Cancel", role: .cancel) {}
                     } message: {
-                        Text("This will delete all sessions from today. This cannot be undone.")
+                        Text("This will delete all completed tasks. This cannot be undone.")
                     }
                 }
                 .padding()
@@ -88,7 +87,7 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Clear All Data")
                             .font(.body)
-                        Text("Remove all sessions and start fresh")
+                        Text("Remove all areas, projects, and tasks")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -102,11 +101,11 @@ struct SettingsView: View {
                     .tint(.red)
                     .confirmationDialog("Clear All Data?", isPresented: $showClearAllConfirm) {
                         Button("Clear Everything", role: .destructive) {
-                            clearAllSessions()
+                            clearAllData()
                         }
                         Button("Cancel", role: .cancel) {}
                     } message: {
-                        Text("This will delete ALL sessions. This cannot be undone.")
+                        Text("This will delete ALL areas, projects, and tasks. This cannot be undone.")
                     }
                 }
                 .padding()
@@ -120,28 +119,6 @@ struct SettingsView: View {
                     .padding(.top, 4)
             }
         }
-    }
-    
-    // MARK: - Stats
-    
-    var statsSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Statistics")
-                .font(.headline)
-            
-            VStack(spacing: 12) {
-                statRow("Total Sessions", value: "\(allSessions.count)")
-                statRow("Today's Sessions", value: "\(todaySessionCount)")
-                statRow("Storage Size", value: storageSize)
-            }
-            .padding()
-            .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 8))
-        }
-    }
-    
-    var todaySessionCount: Int {
-        let calendar = Calendar.current
-        return allSessions.filter { calendar.isDateInToday($0.startTimestamp) }.count
     }
     
     var storageSize: String {
@@ -181,6 +158,10 @@ struct SettingsView: View {
             VStack(spacing: 12) {
                 statRow("Version", value: "0.2")
                 statRow("Build", value: Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—")
+                statRow("Storage Size", value: storageSize)
+                statRow("Areas", value: "\(allAreas.count)")
+                statRow("Projects", value: "\(allProjects.count)")
+                statRow("Tasks", value: "\(allTasks.count)")
             }
             .padding()
             .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 8))
@@ -189,31 +170,36 @@ struct SettingsView: View {
     
     // MARK: - Actions
     
-    func clearTodaySessions() {
-        let calendar = Calendar.current
-        let todaySessions = allSessions.filter { calendar.isDateInToday($0.startTimestamp) }
-        
-        for session in todaySessions {
-            modelContext.delete(session)
+    func clearCompletedTasks() {
+        let completed = allTasks.filter { $0.isCompleted }
+        for task in completed {
+            modelContext.delete(task)
         }
-        
         try? modelContext.save()
-        clearMessage = "Cleared \(todaySessions.count) sessions"
+        clearMessage = "Cleared \(completed.count) completed tasks"
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             clearMessage = nil
         }
     }
     
-    func clearAllSessions() {
-        let sessionCount = allSessions.count
+    func clearAllData() {
+        let areaCount = allAreas.count
+        let projectCount = allProjects.count
+        let taskCount = allTasks.count
         
-        for session in allSessions {
-            modelContext.delete(session)
+        for task in allTasks {
+            modelContext.delete(task)
+        }
+        for project in allProjects {
+            modelContext.delete(project)
+        }
+        for area in allAreas {
+            modelContext.delete(area)
         }
         
         try? modelContext.save()
-        clearMessage = "Cleared \(sessionCount) sessions"
+        clearMessage = "Cleared \(areaCount) areas, \(projectCount) projects, \(taskCount) tasks"
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             clearMessage = nil

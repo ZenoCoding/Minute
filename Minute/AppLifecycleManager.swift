@@ -11,8 +11,6 @@ import SwiftData
 struct AppLifecycleManager: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject var calendarManager: CalendarManager
-    @State private var trackerService: TrackerService?
-    @State private var selectedTab = 0
     @State private var isInitialized = false
     @State private var showCaptureMode = false
     @State private var showSettings = false
@@ -21,38 +19,7 @@ struct AppLifecycleManager: View {
         ZStack {
             // Main app content
             Group {
-                if let tracker = trackerService {
-                    TabView(selection: $selectedTab) {
-                        OrbitView()
-                            .tabItem {
-                                Label("Dashboard", systemImage: "circle.hexagongrid.fill")
-                            }
-                            .tag(0)
-                        
-                        ScreenTimeView()
-                            .tabItem {
-                                Label("Screen Time", systemImage: "chart.bar.fill")
-                            }
-                            .tag(1)
-                        
-                        ClusterReviewView()
-                            .tabItem {
-                                Label("Focus Threads", systemImage: "arrow.triangle.branch")
-                            }
-                            .tag(2)
-                        
-                        TimerView()
-                            .tabItem {
-                                Label("Timer", systemImage: "timer")
-                            }
-                            .tag(3)
-                        
-                        SessionDebugView()
-                            .tabItem {
-                                Label("Debug", systemImage: "ant.fill")
-                            }
-                            .tag(5)
-                    }
+                OrbitView()
                     .toolbar {
                         ToolbarItem(placement: .automatic) {
                             Button {
@@ -67,12 +34,7 @@ struct AppLifecycleManager: View {
                         SettingsView()
                             .frame(width: 400, height: 500)
                     }
-                    .environmentObject(tracker)
                     .environmentObject(calendarManager)
-                } else {
-                    ProgressView("Starting Minute...")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
             }
             
             // Full-screen capture overlay
@@ -86,11 +48,7 @@ struct AppLifecycleManager: View {
         .task {
             guard !isInitialized else { return }
             isInitialized = true
-            
-            let service = TrackerService(modelContext: modelContext)
-            self.trackerService = service
-            service.startTracking()
-            
+
             let habitService = HabitService(modelContext: modelContext)
             habitService.checkAndResetHabits()
         }

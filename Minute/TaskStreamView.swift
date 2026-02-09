@@ -10,20 +10,26 @@ import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
 import EventKit
-import Combine
 
 struct TaskStreamView: View {
-    @EnvironmentObject var tracker: TrackerService
     @EnvironmentObject var calendarManager: CalendarManager
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Project.createdAt) private var allProjects: [Project]
     // Query ALL tasks - filter completion status in code to keep recently completed visible
     @Query(sort: \TaskItem.orderIndex)
     private var allTasks: [TaskItem]
+
+    private var activeProjects: [Project] {
+        allProjects.filter { $0.status == .active }
+    }
+
+    private var isLargeTaskSet: Bool {
+        orderedTasks.count > 60
+    }
     
     // Filter for active projects + show incomplete OR completed today (if due today or later)
     var streamTasks: [StreamItem] {
-        let activeProjectIDs: Set<UUID> = Set(allProjects.filter { $0.status == .active }.map { $0.id })
+        let activeProjectIDs: Set<UUID> = Set(activeProjects.map { $0.id })
         let calendar = Calendar.current
         let todayStart = calendar.startOfDay(for: Date())
         
@@ -57,7 +63,7 @@ struct TaskStreamView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header / Smart Input Area
-            InlineTaskComposer(activeProjects: allProjects.filter { $0.status == .active })
+            InlineTaskComposer(activeProjects: activeProjects)
                 .padding(.horizontal)
                 .padding(.top)
                 .padding(.bottom, 8)
@@ -65,7 +71,8 @@ struct TaskStreamView: View {
             
             // The Stream
             ScrollView {
-                VStack(spacing: 8) {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    let streamSections = sections
                     
                     // Calendar / Schedule Section
                     if calendarManager.authorizationStatus == .fullAccess || calendarManager.authorizationStatus == .writeOnly {
@@ -123,10 +130,10 @@ struct TaskStreamView: View {
                         .padding(.horizontal)
                     }
                     
-                    if sections.isEmpty {
+                    if streamSections.isEmpty {
                         EmptyStreamView()
                     } else {
-                        ForEach(sections) { section in
+                        ForEach(streamSections) { section in
                             VStack(alignment: .leading, spacing: 8) {
                                 // Section Header
                                 HStack {
@@ -161,14 +168,14 @@ struct TaskStreamView: View {
                                 
                                 // Tasks
                                 ForEach(section.tasks) { item in
-                                    TaskStreamRow(item: item, activeProjects: allProjects.filter { $0.status == .active }, onEdit: { editingTask = item.task })
-                                        .transition(.move(edge: .top).combined(with: .opacity))
+                                    TaskStreamRow(item: item, activeProjects: activeProjects, onEdit: { editingTask = item.task })
+                                        .transition(isLargeTaskSet ? .identity : .move(edge: .top).combined(with: .opacity))
                                         .opacity(draggedTask?.id == item.task.id ? 0.0 : 1.0)
                                         .onDrag {
                                             self.draggedTask = item.task
                                             return NSItemProvider(object: item.task.id.uuidString as NSString)
                                         } preview: {
-                                            TaskStreamRow(item: item, activeProjects: allProjects.filter { $0.status == .active }, onEdit: {})
+                                            TaskStreamRow(item: item, activeProjects: activeProjects, onEdit: {})
                                                 .frame(width: 350)
                                                 .background(.regularMaterial)
                                                 .cornerRadius(12)
@@ -179,36 +186,43 @@ struct TaskStreamView: View {
                             }
                         }
                     }
+
+                    // Completed Section
+                    if !recentCompleted.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Recently Completed")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 4)
+                            
+                            ForEach(recentCompleted) { item in
+                                CompletedTaskRow(item: item, modelContext: modelContext)
+                            }
+                        }
+                        .padding(.top, 16)
+                        .transition(isLargeTaskSet ? .identity : .opacity)
+                    }
                 }
                 .padding(.horizontal)
-                .padding(.bottom, 24)
-                
-                // Completed Section
-                if !recentCompleted.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Recently Completed")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                            .foregroundStyle(.tertiary)
-                            .padding(.horizontal, 4)
-                        
-                        ForEach(recentCompleted) { item in
-                            CompletedTaskRow(item: item, modelContext: modelContext)
-                        }
-                    }
-                    .padding(.horizontal)
-                    .padding(.bottom, 40)
-                    .transition(.opacity)
-                }
+                .padding(.bottom, 40)
             }
-            .onAppear(perform: syncTasks)
+            .onAppear {
+                syncTasks()
+                syncCompleted()
+            }
             .onChange(of: allTasks) { _, _ in
-                withAnimation { syncTasks() }
+                scheduleSyncTasks()
             }
             .onChange(of: allProjects) { _, _ in
-                withAnimation { syncTasks() }
+                scheduleSyncTasks()
             }
-            .onChange(of: allCompletedTasks) { _, _ in syncCompleted() }
+            .onChange(of: allCompletedTasks) { _, _ in
+                syncCompleted()
+            }
+            .onDisappear {
+                syncWorkItem?.cancel()
+            }
             .sheet(item: $editingTask) { task in
                 EditTaskSheet(task: task)
             }
@@ -228,19 +242,35 @@ struct TaskStreamView: View {
     private var allCompletedTasks: [TaskItem]
     
     @State private var recentCompleted: [StreamItem] = []
+    @State private var syncWorkItem: DispatchWorkItem?
+
+    private func scheduleSyncTasks(delay: TimeInterval = 0.05) {
+        syncWorkItem?.cancel()
+        let workItem = DispatchWorkItem {
+            syncTasks()
+        }
+        syncWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
     
     private func syncCompleted() {
         // Filter for "Today" (or recent)
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
         
-        // Show tasks completed today
-        let todayCompleted = allCompletedTasks.filter { task in
+        // Show tasks completed today; cap scan to avoid unbounded work as history grows.
+        let todayCompleted = allCompletedTasks.prefix(250).filter { task in
             guard let date = task.completedAt else { return false }
             return date >= today
         }
         
-        recentCompleted = todayCompleted.map { StreamItem(task: $0, project: $0.project!) }
+        let nextCompleted = todayCompleted.compactMap { task -> StreamItem? in
+            guard let project = task.project else { return nil }
+            return StreamItem(task: task, project: project)
+        }
+        if nextCompleted.map({ $0.task.id }) != recentCompleted.map({ $0.task.id }) {
+            recentCompleted = nextCompleted
+        }
     }
     
     private func syncTasks() {
@@ -259,26 +289,31 @@ struct TaskStreamView: View {
         // Simple Set-based diffing to add missing items and remove stale ones
         // This is robust enough for "Add Task" to work instantly.
         
-        let currentIDs = Set(orderedTasks.map { $0.task.id })
+        var nextOrderedTasks = orderedTasks
+        let currentIDs = Set(nextOrderedTasks.map { $0.task.id })
         let targetIDs = Set(targetItems.map { $0.task.id })
         
         // Add new
         let newItems = targetItems.filter { !currentIDs.contains($0.task.id) }
         if !newItems.isEmpty {
-            orderedTasks.append(contentsOf: newItems)
+            nextOrderedTasks.append(contentsOf: newItems)
             // Re-sort to be safe using persisted order
-            orderedTasks.sort { $0.task.orderIndex < $1.task.orderIndex }
+            nextOrderedTasks.sort { $0.task.orderIndex < $1.task.orderIndex }
         }
         
         // Remove deleted/completed
-        if orderedTasks.contains(where: { !targetIDs.contains($0.task.id) }) {
-             orderedTasks.removeAll { !targetIDs.contains($0.task.id) }
+        if nextOrderedTasks.contains(where: { !targetIDs.contains($0.task.id) }) {
+            nextOrderedTasks.removeAll { !targetIDs.contains($0.task.id) }
         }
         
         // If purely reorder happened elsewhere, we might want to respect orderIndex
         // But usually we are the only re-orderer.
         // Let's do a soft sort check.
-        orderedTasks.sort { $0.task.orderIndex < $1.task.orderIndex }
+        nextOrderedTasks.sort { $0.task.orderIndex < $1.task.orderIndex }
+
+        if nextOrderedTasks.map({ $0.task.id }) != orderedTasks.map({ $0.task.id }) {
+            orderedTasks = nextOrderedTasks
+        }
     }
     
     // MARK: - Sections Logic
@@ -367,6 +402,7 @@ struct InlineTaskComposer: View {
     @State private var selectedProject: Project?
     @State private var selectedDate: Date?
     @State private var selectedDuration: TimeInterval?
+    @State private var parseTask: Task<Void, Never>?
     
     // Effective Values
     var effectiveProject: Project? {
@@ -384,6 +420,12 @@ struct InlineTaskComposer: View {
     var effectiveDate: Date? {
         selectedDate ?? detectedDate
     }
+
+    private static let shortDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter
+    }()
     
     var body: some View {
         VStack(spacing: 0) {
@@ -400,10 +442,33 @@ struct InlineTaskComposer: View {
                         createTask()
                     }
                     .onChange(of: text) { _, newValue in
+                        parseTask?.cancel()
                         if newValue.isEmpty {
                             resetComposer(keepText: true)
                         } else {
-                            parseInput(newValue)
+                            let inputSnapshot = newValue
+                            let projectNames = activeProjects.map(\.name)
+                            parseTask = Task {
+                                try? await Task.sleep(for: .milliseconds(120))
+                                guard !Task.isCancelled else { return }
+
+                                let result = await Task.detached(priority: .userInitiated) {
+                                    SmartInputParser.parseForComposer(text: inputSnapshot, projectNames: projectNames)
+                                }.value
+                                guard !Task.isCancelled else { return }
+
+                                await MainActor.run {
+                                    guard text == inputSnapshot else { return }
+                                    detectedProject = result.projectName.flatMap { matchedName in
+                                        activeProjects.first {
+                                            $0.name.caseInsensitiveCompare(matchedName) == .orderedSame
+                                        }
+                                    }
+                                    detectedDuration = result.duration
+                                    detectedDate = result.date
+                                    detectedRecurrence = result.recurrenceInterval
+                                }
+                            }
                         }
                     }
             }
@@ -674,16 +739,8 @@ struct InlineTaskComposer: View {
         .padding(.horizontal, 4)
         .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 12))
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: text.isEmpty)
-    }
-    
-    private func parseInput(_ input: String) {
-        let result = SmartInputParser.parse(text: input, projects: activeProjects)
-        
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-            self.detectedProject = result.project
-            self.detectedDuration = result.duration
-            self.detectedDate = result.date
-            self.detectedRecurrence = result.recurrenceInterval
+        .onDisappear {
+            parseTask?.cancel()
         }
     }
     
@@ -738,9 +795,7 @@ struct InlineTaskComposer: View {
     private func formatDate(_ date: Date) -> String {
         if Calendar.current.isDateInToday(date) { return "Today" }
         if Calendar.current.isDateInTomorrow(date) { return "Tomorrow" }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d"
-        return formatter.string(from: date)
+        return Self.shortDateFormatter.string(from: date)
     }
     
     private func isToday(_ date: Date) -> Bool {
@@ -827,7 +882,6 @@ struct TaskStreamRow: View {
     let item: StreamItem
     let activeProjects: [Project]
     let onEdit: () -> Void
-    @EnvironmentObject var tracker: TrackerService
     @Environment(\.modelContext) private var modelContext
     
     @State private var isHovering = false
@@ -845,6 +899,12 @@ struct TaskStreamRow: View {
     var projectColor: Color {
         Color(hex: item.project.area?.themeColor ?? "8E8E93") ?? .gray
     }
+
+    private static let shortDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter
+    }()
     
     // Helpers
     private func formatDuration(_ seconds: TimeInterval) -> String {
@@ -859,17 +919,11 @@ struct TaskStreamRow: View {
     private func formatDate(_ date: Date) -> String {
         if Calendar.current.isDateInToday(date) { return "Today" }
         if Calendar.current.isDateInTomorrow(date) { return "Tomorrow" }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d"
-        return formatter.string(from: date)
+        return Self.shortDateFormatter.string(from: date)
     }
     
     private func isOverdue(_ date: Date) -> Bool {
         date < Date() && !Calendar.current.isDateInToday(date)
-    }
-    
-    var isActive: Bool {
-        tracker.activeTask?.id == item.task.id
     }
     
     @State private var isCompleting = false
@@ -881,7 +935,6 @@ struct TaskStreamRow: View {
                 withAnimation(.snappy) {
                     isCompleting = true
                 }
-                if isActive { tracker.stopCurrentTask() }
                 // Capture task reference before async delay
                 let taskToComplete = item.task
                 let context = modelContext
@@ -1040,7 +1093,7 @@ struct TaskStreamRow: View {
                 .foregroundStyle(Color.white.opacity(0.05)),
             alignment: .bottom
         )
-        .background(isActive ? Color.accentColor.opacity(0.1) : Color.clear)
+        .background(isHovering ? Color.accentColor.opacity(0.08) : Color.clear)
         .cornerRadius(8)
         .contentShape(Rectangle())
         .onHover { hover in
@@ -1158,4 +1211,3 @@ struct CalendarEventRow: View {
         .cornerRadius(6)
     }
 }
-

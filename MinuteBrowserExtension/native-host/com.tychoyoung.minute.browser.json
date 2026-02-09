@@ -1,9 +1,0 @@
-{
-    "name": "com.tychoyoung.minute.browser",
-    "description": "Minute Browser Context Native Messaging Host",
-    "path": "/Users/tycho/Projects/Minute/MinuteBrowserExtension/native-host/minute-browser-host-bin",
-    "type": "stdio",
-    "allowed_origins": [
-        "chrome-extension://npjhdghpfneapclimghnoolpjjdjjnaa/"
-    ]
-}
