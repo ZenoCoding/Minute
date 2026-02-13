@@ -10,28 +10,89 @@ import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
 import EventKit
+import Combine
 
 struct TaskStreamView: View {
     @EnvironmentObject var calendarManager: CalendarManager
     @Environment(\.modelContext) private var modelContext
+    @AppStorage(DayCapacitySettings.useFallbackDurationKey) private var useFallbackDuration = false
+    @AppStorage(DayCapacitySettings.fallbackDurationMinutesKey) private var fallbackDurationMinutes = DayCapacitySettings.defaultFallbackDurationMinutes
+    @AppStorage(DayCapacitySettings.sleepWeekdayWakeMinutesKey) private var sleepWeekdayWakeMinutes = DayCapacitySettings.defaultSleepWeekdayWakeMinutes
+    @AppStorage(DayCapacitySettings.sleepWeekdayBedMinutesKey) private var sleepWeekdayBedMinutes = DayCapacitySettings.defaultSleepWeekdayBedMinutes
+    @AppStorage(DayCapacitySettings.sleepWeekendWakeMinutesKey) private var sleepWeekendWakeMinutes = DayCapacitySettings.defaultSleepWeekendWakeMinutes
+    @AppStorage(DayCapacitySettings.sleepWeekendBedMinutesKey) private var sleepWeekendBedMinutes = DayCapacitySettings.defaultSleepWeekendBedMinutes
     @Query(sort: \Project.createdAt) private var allProjects: [Project]
     // Query ALL tasks - filter completion status in code to keep recently completed visible
     @Query(sort: \TaskItem.orderIndex)
     private var allTasks: [TaskItem]
+    private let dayCapacityService = DayCapacityService()
+    private let dayClassifier = SleepAwareDayClassifier()
+    private let capacityTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     private var activeProjects: [Project] {
         allProjects.filter { $0.status == .active }
     }
 
+    private var activeProjectIDs: Set<UUID> {
+        Set(activeProjects.map(\.id))
+    }
+
     private var isLargeTaskSet: Bool {
         orderedTasks.count > 60
     }
-    
-    // Filter for active projects + show incomplete OR completed today (if due today or later)
+
+    private var hasCalendarAccess: Bool {
+        calendarManager.authorizationStatus == .fullAccess || calendarManager.authorizationStatus == .writeOnly
+    }
+
+    private var capacityTasks: [TaskItem] {
+        allTasks.filter { task in
+            guard !task.isCompleted, let project = task.project else { return false }
+            return activeProjectIDs.contains(project.id)
+        }
+    }
+
+    private var sleepSchedule: SleepSchedule {
+        SleepSchedule(
+            weekdayWakeMinutes: sleepWeekdayWakeMinutes,
+            weekdayBedMinutes: sleepWeekdayBedMinutes,
+            weekendWakeMinutes: sleepWeekendWakeMinutes,
+            weekendBedMinutes: sleepWeekendBedMinutes
+        )
+    }
+
+    private var activePlanningWindow: PlanningDayWindow {
+        dayClassifier.planningWindow(for: capacityNow, schedule: sleepSchedule)
+    }
+
+    private var nextPlanningWindow: PlanningDayWindow {
+        dayClassifier.planningWindow(after: activePlanningWindow, offset: 1, schedule: sleepSchedule)
+    }
+
+    private var weekPlanningWindowEnd: Date {
+        dayClassifier.planningWindow(after: activePlanningWindow, offset: 7, schedule: sleepSchedule).end
+    }
+
+    private var dayCapacitySnapshot: DayCapacitySnapshot {
+        let planningWindow = activePlanningWindow
+        let rangeStart = planningWindow.isOffHours ? planningWindow.start : max(capacityNow, planningWindow.start)
+        let range = DateInterval(start: rangeStart, end: planningWindow.end)
+        let busyIntervals = hasCalendarAccess ? calendarManager.busyIntervals(in: range) : []
+
+        return dayCapacityService.snapshot(
+            now: capacityNow,
+            planningWindow: planningWindow,
+            tasks: capacityTasks,
+            busyIntervals: busyIntervals,
+            useFallbackDuration: useFallbackDuration,
+            fallbackDurationMinutes: fallbackDurationMinutes
+        )
+    }
+
+    // Filter for active projects + show incomplete OR completed in current planning window.
     var streamTasks: [StreamItem] {
-        let activeProjectIDs: Set<UUID> = Set(activeProjects.map { $0.id })
-        let calendar = Calendar.current
-        let todayStart = calendar.startOfDay(for: Date())
+        let planningStart = activePlanningWindow.start
+        let planningEnd = activePlanningWindow.end
         
         var visibleTasks: [TaskItem] = []
         for task in allTasks {
@@ -41,15 +102,12 @@ struct TaskStreamView: View {
             if !task.isCompleted {
                 // Show all incomplete tasks
                 visibleTasks.append(task)
-            } else if let completedAt = task.completedAt, completedAt >= todayStart {
-                // Completed today - only show if it was due today or in the future (not overdue)
-                let dueDate = task.dueDate ?? Date()
-                let dueDayStart = calendar.startOfDay(for: dueDate)
-                if dueDayStart >= todayStart {
-                    // Was due today or future - keep visible briefly
+            } else if let completedAt = task.completedAt, completedAt >= planningStart, completedAt < planningEnd {
+                // Keep recently completed tasks from the active planning window visible.
+                let dueDate = task.dueDate ?? planningStart
+                if dueDate >= planningStart {
                     visibleTasks.append(task)
                 }
-                // Otherwise it was overdue and completed - hide immediately
             }
         }
         
@@ -63,7 +121,10 @@ struct TaskStreamView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header / Smart Input Area
-            InlineTaskComposer(activeProjects: activeProjects)
+            InlineTaskComposer(
+                activeProjects: activeProjects,
+                capacitySummaryForDate: capacitySummaryForDate
+            )
                 .padding(.horizontal)
                 .padding(.top)
                 .padding(.bottom, 8)
@@ -73,62 +134,6 @@ struct TaskStreamView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
                     let streamSections = sections
-                    
-                    // Calendar / Schedule Section
-                    if calendarManager.authorizationStatus == .fullAccess || calendarManager.authorizationStatus == .writeOnly {
-                        // Filter out past events
-                        let now = Date()
-                        let allTodayEvents = calendarManager.events(for: now)
-                        let upcomingEvents = allTodayEvents.filter { $0.endDate > now }
-                        
-                        if !upcomingEvents.isEmpty {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Button(action: { withAnimation { isScheduleExpanded.toggle() } }) {
-                                    HStack {
-                                        Text("Schedule")
-                                            .font(.headline)
-                                            .foregroundStyle(.secondary)
-                                        
-                                        Spacer()
-                                        
-                                        Text("\(upcomingEvents.count)")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Color.secondary.opacity(0.1), in: Capsule())
-                                        
-                                        Image(systemName: "chevron.right")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .rotationEffect(.degrees(isScheduleExpanded ? 90 : 0))
-                                    }
-                                    .padding(.horizontal, 4)
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                
-                                if isScheduleExpanded {
-                                    ForEach(upcomingEvents, id: \.eventIdentifier) { event in
-                                        CalendarEventRow(event: event)
-                                            .transition(.opacity.combined(with: .move(edge: .top)))
-                                    }
-                                }
-                            }
-                            .padding(.horizontal)
-                            .padding(.bottom, 12)
-                        } 
-                    } else if calendarManager.authorizationStatus == .notDetermined {
-                        Button("Connect Calendar") {
-                            calendarManager.requestAccess()
-                        }
-                        .buttonStyle(.plain)
-                        .padding()
-                        .frame(maxWidth: .infinity)
-                        .background(Color.blue.opacity(0.1))
-                        .cornerRadius(8)
-                        .padding(.horizontal)
-                    }
                     
                     if streamSections.isEmpty {
                         EmptyStreamView()
@@ -147,7 +152,14 @@ struct TaskStreamView: View {
                                         sum + (item.task.estimatedDuration ?? 0)
                                     } / 3600.0
                                     
-                                    if totalHours > 0 {
+                                    if let capacitySummary = capacitySummary(for: section) {
+                                        Text(capacitySummary.text)
+                                            .font(.caption)
+                                            .foregroundStyle(capacitySummary.foregroundStyle)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(capacitySummary.backgroundStyle, in: Capsule())
+                                    } else if totalHours > 0 {
                                         Text(totalHours.truncatingRemainder(dividingBy: 1) == 0 ? "\(Int(totalHours))h" : String(format: "%.1fh", totalHours))
                                             .font(.caption)
                                             .foregroundStyle(.tertiary)
@@ -165,6 +177,36 @@ struct TaskStreamView: View {
                                 }
                                 .padding(.top, 16)
                                 .padding(.horizontal, 4)
+
+                                if section.title == "Today" && dayCapacitySnapshot.overloadSeconds > 0 {
+                                    HStack(spacing: 8) {
+                                        Label("Over by \(formatHours(dayCapacitySnapshot.overloadSeconds))", systemImage: "exclamationmark.triangle.fill")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+
+                                        Spacer()
+
+                                        Button("Suggest Deferrals") {
+                                            prepareDeferralSuggestion()
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+
+                                        if let pendingDeferralSuggestion {
+                                            Text("Moves \(pendingDeferralSuggestion.taskCount) (\(formatHours(pendingDeferralSuggestion.deferredSeconds))).")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .padding(.horizontal, 4)
+                                }
+
+                                if section.title == "Today", let capacityMessage {
+                                    Text(capacityMessage)
+                                        .font(.caption)
+                                        .foregroundStyle(.green)
+                                        .padding(.horizontal, 4)
+                                }
                                 
                                 // Tasks
                                 ForEach(section.tasks) { item in
@@ -208,17 +250,29 @@ struct TaskStreamView: View {
                 .padding(.bottom, 40)
             }
             .onAppear {
+                capacityNow = Date()
                 syncTasks()
                 syncCompleted()
+                if hasCalendarAccess {
+                    calendarManager.fetchEvents()
+                }
             }
             .onChange(of: allTasks) { _, _ in
                 scheduleSyncTasks()
+                pendingDeferralSuggestion = nil
             }
             .onChange(of: allProjects) { _, _ in
                 scheduleSyncTasks()
+                pendingDeferralSuggestion = nil
             }
             .onChange(of: allCompletedTasks) { _, _ in
                 syncCompleted()
+            }
+            .onReceive(capacityTimer) { date in
+                capacityNow = date
+                scheduleSyncTasks(delay: 0)
+                syncCompleted()
+                pendingDeferralSuggestion = nil
             }
             .onDisappear {
                 syncWorkItem?.cancel()
@@ -228,14 +282,29 @@ struct TaskStreamView: View {
             }
         }
         .background(.regularMaterial) // Unified Sidebar Material
+        .confirmationDialog("Defer tasks to next planning day?", isPresented: $showDeferralConfirmation) {
+            if let suggestion = pendingDeferralSuggestion {
+                Button("Defer \(suggestion.taskCount) Task\(suggestion.taskCount == 1 ? "" : "s")") {
+                    applyDeferralSuggestion(suggestion)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if let suggestion = pendingDeferralSuggestion {
+                Text("Move \(suggestion.taskCount) task\(suggestion.taskCount == 1 ? "" : "s") to the next planning day and free about \(formatHours(suggestion.deferredSeconds)).")
+            }
+        }
     }
     
     // We keep this for the DropDelegate to have a binding for live reordering
     @State private var orderedTasks: [StreamItem] = []
     @State private var drags: [StreamItem] = [] // Unused but kept for structure if needed
     @State private var draggedTask: TaskItem?
-    @State private var isScheduleExpanded = true
     @State private var editingTask: TaskItem?
+    @State private var capacityNow = Date()
+    @State private var pendingDeferralSuggestion: DayCapacityDeferralSuggestion?
+    @State private var showDeferralConfirmation = false
+    @State private var capacityMessage: String?
     
     // Recent Archive
     @Query(filter: #Predicate<TaskItem> { $0.isCompleted }, sort: \TaskItem.completedAt, order: .reverse)
@@ -254,17 +323,16 @@ struct TaskStreamView: View {
     }
     
     private func syncCompleted() {
-        // Filter for "Today" (or recent)
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
+        // Filter for current planning window.
+        let planningStart = activePlanningWindow.start
+        let planningEnd = activePlanningWindow.end
         
-        // Show tasks completed today; cap scan to avoid unbounded work as history grows.
-        let todayCompleted = allCompletedTasks.prefix(250).filter { task in
+        let planningCompleted = allCompletedTasks.prefix(250).filter { task in
             guard let date = task.completedAt else { return false }
-            return date >= today
+            return date >= planningStart && date < planningEnd
         }
         
-        let nextCompleted = todayCompleted.compactMap { task -> StreamItem? in
+        let nextCompleted = planningCompleted.compactMap { task -> StreamItem? in
             guard let project = task.project else { return nil }
             return StreamItem(task: task, project: project)
         }
@@ -315,6 +383,161 @@ struct TaskStreamView: View {
             orderedTasks = nextOrderedTasks
         }
     }
+
+    private func prepareDeferralSuggestion() {
+        let suggestion = dayCapacityService.suggestedDeferrals(
+            planningWindow: activePlanningWindow,
+            tasks: capacityTasks,
+            overloadSeconds: dayCapacitySnapshot.overloadSeconds,
+            useFallbackDuration: useFallbackDuration,
+            fallbackDurationMinutes: fallbackDurationMinutes
+        )
+
+        pendingDeferralSuggestion = suggestion
+
+        guard suggestion != nil else {
+            showCapacityMessage("No deferrable tasks due in this planning day.")
+            return
+        }
+
+        showDeferralConfirmation = true
+    }
+
+    private func applyDeferralSuggestion(_ suggestion: DayCapacityDeferralSuggestion) {
+        let targetWindow = nextPlanningWindow
+        let taskIDs = Set(suggestion.taskIDs)
+        for task in allTasks where taskIDs.contains(task.id) {
+            task.dueDate = dayCapacityService.deferredDateToNextPlanningDay(from: task.dueDate, nextPlanningWindow: targetWindow)
+        }
+
+        do {
+            try modelContext.save()
+            scheduleSyncTasks()
+            showCapacityMessage("Deferred \(suggestion.taskCount) task\(suggestion.taskCount == 1 ? "" : "s") to next planning day.")
+        } catch {
+            showCapacityMessage("Unable to defer tasks right now.")
+        }
+
+        pendingDeferralSuggestion = nil
+    }
+
+    private func showCapacityMessage(_ message: String) {
+        capacityMessage = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            if capacityMessage == message {
+                capacityMessage = nil
+            }
+        }
+    }
+
+    private func formatHours(_ seconds: TimeInterval) -> String {
+        let hours = seconds / 3600
+        return hours.truncatingRemainder(dividingBy: 1) == 0 ? "\(Int(hours))h" : String(format: "%.1fh", hours)
+    }
+
+    private struct CapacitySummaryStyle {
+        let text: String
+        let foregroundStyle: Color
+        let backgroundStyle: Color
+        let isOverloaded: Bool
+    }
+
+    private func capacitySummary(for section: StreamSection) -> CapacitySummaryStyle? {
+        guard let planningWindow = planningWindow(forSectionTitle: section.title) else {
+            return nil
+        }
+
+        let now = section.title == "Today" ? capacityNow : planningWindow.start
+        let tasks = section.tasks.map(\.task)
+        let snapshot = capacitySnapshot(
+            planningWindow: planningWindow,
+            now: now,
+            tasks: tasks
+        )
+
+        return capacitySummaryStyle(from: snapshot)
+    }
+
+    private func capacitySummaryForDate(_ date: Date) -> (text: String, isOverloaded: Bool)? {
+        let planningWindow = planningWindow(for: date)
+        let includeEarlierDueDates = Calendar.current.isDate(planningWindow.labelDate, inSameDayAs: activePlanningWindow.labelDate)
+        let now = includeEarlierDueDates ? capacityNow : planningWindow.start
+        let tasks = tasksForPlanningDay(planningWindow, includeEarlierDueDates: includeEarlierDueDates)
+        let snapshot = capacitySnapshot(
+            planningWindow: planningWindow,
+            now: now,
+            tasks: tasks
+        )
+        let summary = capacitySummaryStyle(from: snapshot)
+
+        return (summary.text, summary.isOverloaded)
+    }
+
+    private func planningWindow(forSectionTitle title: String) -> PlanningDayWindow? {
+        switch title {
+        case "Today":
+            return activePlanningWindow
+        case "Tomorrow":
+            return nextPlanningWindow
+        default:
+            return nil
+        }
+    }
+
+    private func planningWindow(for date: Date) -> PlanningDayWindow {
+        let calendar = Calendar.current
+        let dayStart = calendar.startOfDay(for: date)
+        let midday = calendar.date(bySettingHour: 12, minute: 0, second: 0, of: dayStart) ?? dayStart
+        return dayClassifier.planningWindow(for: midday, schedule: sleepSchedule)
+    }
+
+    private func tasksForPlanningDay(_ planningWindow: PlanningDayWindow, includeEarlierDueDates: Bool) -> [TaskItem] {
+        capacityTasks.filter { task in
+            guard let dueDate = task.dueDate else { return false }
+            if includeEarlierDueDates {
+                return dueDate < planningWindow.end
+            }
+            return dueDate >= planningWindow.start && dueDate < planningWindow.end
+        }
+    }
+
+    private func capacitySnapshot(
+        planningWindow: PlanningDayWindow,
+        now: Date,
+        tasks: [TaskItem]
+    ) -> DayCapacitySnapshot {
+        let range = DateInterval(start: planningWindow.start, end: planningWindow.end)
+        let busyIntervals = hasCalendarAccess ? calendarManager.busyIntervals(in: range) : []
+
+        return dayCapacityService.snapshot(
+            now: now,
+            planningWindow: planningWindow,
+            tasks: tasks,
+            busyIntervals: busyIntervals,
+            useFallbackDuration: useFallbackDuration,
+            fallbackDurationMinutes: fallbackDurationMinutes
+        )
+    }
+
+    private func capacitySummaryStyle(from snapshot: DayCapacitySnapshot) -> CapacitySummaryStyle {
+        let colors: (foreground: Color, background: Color) = {
+            switch snapshot.status {
+            case .onTrack:
+                return (.secondary, Color.blue.opacity(0.1))
+            case .nearCapacity:
+                return (.orange, Color.orange.opacity(0.15))
+            case .overloaded:
+                return (.red, Color.red.opacity(0.15))
+            }
+        }()
+
+        return CapacitySummaryStyle(
+            text: "\(formatHours(snapshot.requiredSecondsToday)) / \(formatHours(snapshot.availableSecondsToday))",
+            foregroundStyle: colors.foreground,
+            backgroundStyle: colors.background,
+            isOverloaded: snapshot.status == .overloaded
+        )
+    }
     
     // MARK: - Sections Logic
     
@@ -336,12 +559,10 @@ struct TaskStreamView: View {
         var tomorrow: [StreamItem] = []
         var week: [StreamItem] = []
         var backlog: [StreamItem] = []
-        
-        let calendar = Calendar.current
-        let now = Date()
-        let todayEnd = calendar.startOfDay(for: now).addingTimeInterval(86400)
-        let tomorrowEnd = calendar.startOfDay(for: now).addingTimeInterval(86400 * 2)
-        let weekEnd = calendar.date(byAdding: .day, value: 7, to: now)!
+
+        let todayEnd = activePlanningWindow.end
+        let tomorrowEnd = nextPlanningWindow.end
+        let weekEnd = weekPlanningWindowEnd
         
         for item in orderedTasks {
             if let date = item.task.dueDate {
@@ -382,6 +603,7 @@ struct TaskStreamView: View {
 
 struct InlineTaskComposer: View {
     let activeProjects: [Project]
+    let capacitySummaryForDate: (Date) -> (text: String, isOverloaded: Bool)?
     @Environment(\.modelContext) private var modelContext
     
     @State private var text: String = ""
@@ -452,22 +674,18 @@ struct InlineTaskComposer: View {
                                 try? await Task.sleep(for: .milliseconds(120))
                                 guard !Task.isCancelled else { return }
 
-                                let result = await Task.detached(priority: .userInitiated) {
-                                    SmartInputParser.parseForComposer(text: inputSnapshot, projectNames: projectNames)
-                                }.value
+                                let result = SmartInputParser.parseForComposer(text: inputSnapshot, projectNames: projectNames)
                                 guard !Task.isCancelled else { return }
 
-                                await MainActor.run {
-                                    guard text == inputSnapshot else { return }
-                                    detectedProject = result.projectName.flatMap { matchedName in
-                                        activeProjects.first {
-                                            $0.name.caseInsensitiveCompare(matchedName) == .orderedSame
-                                        }
+                                guard text == inputSnapshot else { return }
+                                detectedProject = result.projectName.flatMap { matchedName in
+                                    activeProjects.first {
+                                        $0.name.caseInsensitiveCompare(matchedName) == .orderedSame
                                     }
-                                    detectedDuration = result.duration
-                                    detectedDate = result.date
-                                    detectedRecurrence = result.recurrenceInterval
                                 }
+                                detectedDuration = result.duration
+                                detectedDate = result.date
+                                detectedRecurrence = result.recurrenceInterval
                             }
                         }
                     }
@@ -550,6 +768,15 @@ struct InlineTaskComposer: View {
                                         .fontWeight(.medium)
                                         .foregroundStyle(isToday(date) ? .green : .primary)
                                         .lineLimit(1)
+
+                                    if let capacitySummary = capacitySummaryForDate(date) {
+                                        Text(capacitySummary.text)
+                                            .font(.caption2)
+                                            .fontWeight(.semibold)
+                                            .monospacedDigit()
+                                            .foregroundStyle(capacitySummary.isOverloaded ? .red : .secondary)
+                                            .lineLimit(1)
+                                    }
                                 }
                             }
                         }
@@ -1142,6 +1369,197 @@ struct TaskStreamRow: View {
     }
 }
 
+private struct ScheduleCompactHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+struct ScheduleHighlightsCard: View {
+    let highlights: [CalendarHighlight]
+    let todayEvents: [EKEvent]
+    let onOpenCalendar: () -> Void
+
+    @State private var isHoveringCompact = false
+    @State private var isHoveringExpanded = false
+    @State private var isExpandedVisible = false
+    @State private var compactHeight: CGFloat = 0
+    @State private var closeWorkItem: DispatchWorkItem?
+
+    var body: some View {
+        compactCard
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(key: ScheduleCompactHeightKey.self, value: proxy.size.height)
+                }
+            )
+            .onPreferenceChange(ScheduleCompactHeightKey.self) { compactHeight = $0 }
+            .onHover { hovering in
+                isHoveringCompact = hovering
+                updateExpandedVisibility()
+            }
+            .overlay(alignment: .topLeading) {
+                if isExpandedVisible && !todayEvents.isEmpty {
+                    expandedCard
+                        .padding(.top, compactHeight + 6)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                        .zIndex(5)
+                        .onHover { hovering in
+                            isHoveringExpanded = hovering
+                            updateExpandedVisibility()
+                        }
+                }
+            }
+            .onDisappear {
+                closeWorkItem?.cancel()
+            }
+    }
+
+    private var compactCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Schedule Highlights")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Text("\(todayEvents.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.secondary.opacity(0.1), in: Capsule())
+            }
+
+            if highlights.isEmpty {
+                Text("No key events coming up.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+            } else {
+                ForEach(highlights) { highlight in
+                    ScheduleHighlightRow(highlight: highlight)
+                }
+            }
+
+            HStack {
+                Text(todayEvents.isEmpty ? "No remaining events today." : "Hover to view the full schedule.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button("Open Calendar", action: onOpenCalendar)
+                    .buttonStyle(.plain)
+                    .font(.caption)
+            }
+        }
+        .padding(10)
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+        )
+    }
+
+    private var expandedCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Today's Schedule")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Spacer()
+                Button("Open Calendar", action: onOpenCalendar)
+                    .buttonStyle(.plain)
+                    .font(.caption)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(todayEvents, id: \.calendarItemIdentifier) { event in
+                        CalendarEventRow(event: event)
+                    }
+                }
+            }
+            .frame(maxHeight: 250)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.15), radius: 12, x: 0, y: 6)
+    }
+
+    private func updateExpandedVisibility() {
+        closeWorkItem?.cancel()
+
+        if isHoveringCompact || isHoveringExpanded {
+            withAnimation(.easeOut(duration: 0.12)) {
+                isExpandedVisible = true
+            }
+            return
+        }
+
+        let workItem = DispatchWorkItem {
+            withAnimation(.easeOut(duration: 0.15)) {
+                isExpandedVisible = false
+            }
+        }
+        closeWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: workItem)
+    }
+}
+
+struct ScheduleHighlightRow: View {
+    let highlight: CalendarHighlight
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .trailing, spacing: 0) {
+                if highlight.isAllDay {
+                    Text("All Day")
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                } else {
+                    Text(highlight.startDate, style: .time)
+                        .font(.caption2)
+                        .fontWeight(.bold)
+                    Text(highlight.endDate, style: .time)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 52, alignment: .trailing)
+
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color(nsColor: highlight.calendarColor))
+                .frame(width: 4)
+                .padding(.vertical, 2)
+
+            HStack(spacing: 6) {
+                if highlight.kind == .specialDay {
+                    Image(systemName: "sparkles")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Text(highlight.title)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+        }
+        .padding(8)
+        .background(Color.primary.opacity(0.03))
+        .cornerRadius(6)
+    }
+}
+
 struct EmptyStreamView: View {
     var body: some View {
         VStack(spacing: 16) {
@@ -1173,24 +1591,27 @@ struct CalendarEventRow: View {
     
     var body: some View {
         HStack(spacing: 12) {
-            // Time Column
             VStack(alignment: .trailing, spacing: 0) {
-                Text(event.startDate, style: .time)
-                    .font(.caption2)
-                    .fontWeight(.bold)
-                Text(event.endDate, style: .time)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                if event.isAllDay {
+                    Text("All Day")
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                } else {
+                    Text(event.startDate, style: .time)
+                        .font(.caption2)
+                        .fontWeight(.bold)
+                    Text(event.endDate, style: .time)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
-            .frame(width: 44, alignment: .trailing)
+            .frame(width: 52, alignment: .trailing)
             
-            // Marker
             RoundedRectangle(cornerRadius: 2)
                 .fill(Color(nsColor: event.calendar.color))
                 .frame(width: 4)
                 .padding(.vertical, 2)
             
-            // Content
             VStack(alignment: .leading, spacing: 2) {
                 Text(event.title)
                     .font(.subheadline)

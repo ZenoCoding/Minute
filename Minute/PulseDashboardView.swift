@@ -8,25 +8,70 @@
 
 import SwiftUI
 import SwiftData
+import EventKit
+import Combine
+import AppKit
 
 struct PulseDashboardView: View {
+    @EnvironmentObject var calendarManager: CalendarManager
     @Query(sort: \Area.orderIndex) private var areas: [Area]
+    @State private var now = Date()
+    private let minuteTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
     
     // Navigation to Areas
     let onNavigateToAreas: () -> Void
+
+    private var hasCalendarAccess: Bool {
+        calendarManager.authorizationStatus == .fullAccess || calendarManager.authorizationStatus == .writeOnly
+    }
+
+    private var scheduleHighlights: [CalendarHighlight] {
+        calendarManager.highlights(for: now, now: now)
+    }
+
+    private var todayEvents: [EKEvent] {
+        calendarManager.todayEvents(for: now, now: now)
+    }
     
     var body: some View {
         ScrollView {
-            VStack(spacing: 32) {
+            VStack(alignment: .leading, spacing: 28) {
                 
                 // Date Header
                 HStack {
-                    Text(Date(), format: .dateTime.weekday(.wide).month().day())
+                    Text(now, format: .dateTime.weekday(.wide).month().day())
                         .font(.largeTitle)
                         .fontWeight(.bold)
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Today at a Glance")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+
+                    if hasCalendarAccess {
+                        ScheduleHighlightsCard(
+                            highlights: scheduleHighlights,
+                            todayEvents: todayEvents,
+                            onOpenCalendar: openCalendarApp
+                        )
+                    } else if calendarManager.authorizationStatus == .notDetermined {
+                        Button("Connect Calendar") {
+                            calendarManager.requestAccess()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    } else {
+                        Text("Calendar access is off. Enable it in System Settings to show highlights.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+                .frame(maxWidth: 560, alignment: .leading)
                 
                 // Areas Summary (Navigation Entry)
                 VStack(alignment: .leading, spacing: 12) {
@@ -68,6 +113,25 @@ struct PulseDashboardView: View {
             .padding(32)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear {
+            now = Date()
+            if hasCalendarAccess {
+                calendarManager.fetchEvents()
+            }
+        }
+        .onReceive(minuteTimer) { date in
+            now = date
+        }
+        .onChange(of: calendarManager.authorizationStatus) { _, status in
+            if status == .fullAccess || status == .writeOnly {
+                calendarManager.fetchEvents()
+            }
+        }
+    }
+
+    private func openCalendarApp() {
+        guard let url = URL(string: "calshow:\(now.timeIntervalSinceReferenceDate)") else { return }
+        NSWorkspace.shared.open(url)
     }
 }
 

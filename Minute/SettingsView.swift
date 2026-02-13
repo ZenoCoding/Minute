@@ -7,12 +7,22 @@
 
 import SwiftUI
 import SwiftData
+import EventKit
 
 struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject var calendarManager: CalendarManager
     @Query private var allTasks: [TaskItem]
     @Query private var allProjects: [Project]
     @Query private var allAreas: [Area]
+    @AppStorage(DayCapacitySettings.useFallbackDurationKey) private var useFallbackDuration = false
+    @AppStorage(DayCapacitySettings.fallbackDurationMinutesKey) private var fallbackDurationMinutes = DayCapacitySettings.defaultFallbackDurationMinutes
+    @AppStorage(DayCapacitySettings.sleepWeekdayWakeMinutesKey) private var sleepWeekdayWakeMinutes = DayCapacitySettings.defaultSleepWeekdayWakeMinutes
+    @AppStorage(DayCapacitySettings.sleepWeekdayBedMinutesKey) private var sleepWeekdayBedMinutes = DayCapacitySettings.defaultSleepWeekdayBedMinutes
+    @AppStorage(DayCapacitySettings.sleepWeekendWakeMinutesKey) private var sleepWeekendWakeMinutes = DayCapacitySettings.defaultSleepWeekendWakeMinutes
+    @AppStorage(DayCapacitySettings.sleepWeekendBedMinutesKey) private var sleepWeekendBedMinutes = DayCapacitySettings.defaultSleepWeekendBedMinutes
+    @AppStorage(CalendarManager.includeSpecialDaysKey) private var includeSpecialDays = true
+    @AppStorage(CalendarManager.includeRecurringMeetingsKey) private var includeRecurringMeetings = true
     
     @State private var showClearCompletedConfirm = false
     @State private var showClearAllConfirm = false
@@ -24,6 +34,10 @@ struct SettingsView: View {
                 header
                 
                 dataManagementSection
+
+                capacityPlanningSection
+
+                calendarHighlightsSection
                 
                 aboutSection
                 
@@ -33,6 +47,64 @@ struct SettingsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    var calendarHighlightsSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Calendar Highlights")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle(isOn: $includeSpecialDays) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Include holidays and birthdays")
+                            .font(.body)
+                        Text("Show all-day holiday and birthday events in schedule highlights.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+
+                Toggle(isOn: $includeRecurringMeetings) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Include recurring meetings")
+                            .font(.body)
+                        Text("Show recurring meeting-series events in schedule highlights.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+
+                Divider()
+
+                if hasCalendarAccess {
+                    let calendars = calendarManager.availableCalendars()
+
+                    if calendars.isEmpty {
+                        Text("No calendars available.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(calendars, id: \.calendarIdentifier) { calendar in
+                            calendarModeRow(calendar)
+                        }
+                    }
+                } else if calendarManager.authorizationStatus == .notDetermined {
+                    Button("Connect Calendar") {
+                        calendarManager.requestAccess()
+                    }
+                    .buttonStyle(.bordered)
+                } else {
+                    Text("Calendar access is off. Enable calendar access in System Settings to configure highlight filters.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding()
+            .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 8))
+        }
     }
     
     // MARK: - Header
@@ -148,6 +220,55 @@ struct SettingsView: View {
         }
     }
     
+    // MARK: - Capacity Planning
+
+    var capacityPlanningSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Capacity Planning")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle(isOn: $useFallbackDuration) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Use fallback for unestimated tasks")
+                            .font(.body)
+                        Text("Include tasks with no estimate in the Daily Capacity Meter.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+
+                if useFallbackDuration {
+                    Stepper(value: $fallbackDurationMinutes, in: 5...240, step: 5) {
+                        HStack {
+                            Text("Fallback Duration")
+                            Spacer()
+                            Text("\(fallbackDurationMinutes) min")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Sleep Schedule")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    timeSettingRow("Weekday Wake", selection: weekdayWakeBinding)
+                    timeSettingRow("Weekday Bedtime", selection: weekdayBedBinding)
+                    timeSettingRow("Weekend Wake", selection: weekendWakeBinding)
+                    timeSettingRow("Weekend Bedtime", selection: weekendBedBinding)
+                }
+            }
+            .padding()
+            .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
     // MARK: - About
     
     var aboutSection: some View {
@@ -169,7 +290,91 @@ struct SettingsView: View {
     }
     
     // MARK: - Actions
-    
+
+    private var weekdayWakeBinding: Binding<Date> {
+        Binding(
+            get: { minutesToTimeDate(sleepWeekdayWakeMinutes) },
+            set: { sleepWeekdayWakeMinutes = timeDateToMinutes($0) }
+        )
+    }
+
+    private var weekdayBedBinding: Binding<Date> {
+        Binding(
+            get: { minutesToTimeDate(sleepWeekdayBedMinutes) },
+            set: { sleepWeekdayBedMinutes = timeDateToMinutes($0) }
+        )
+    }
+
+    private var weekendWakeBinding: Binding<Date> {
+        Binding(
+            get: { minutesToTimeDate(sleepWeekendWakeMinutes) },
+            set: { sleepWeekendWakeMinutes = timeDateToMinutes($0) }
+        )
+    }
+
+    private var weekendBedBinding: Binding<Date> {
+        Binding(
+            get: { minutesToTimeDate(sleepWeekendBedMinutes) },
+            set: { sleepWeekendBedMinutes = timeDateToMinutes($0) }
+        )
+    }
+
+    private func timeSettingRow(_ label: String, selection: Binding<Date>) -> some View {
+        HStack {
+            Text(label)
+            Spacer()
+            DatePicker("", selection: selection, displayedComponents: .hourAndMinute)
+                .labelsHidden()
+        }
+    }
+
+    private func minutesToTimeDate(_ minutes: Int) -> Date {
+        let clamped = min(max(minutes, 0), 1439)
+        let start = Calendar.current.startOfDay(for: Date())
+        return Calendar.current.date(byAdding: .minute, value: clamped, to: start) ?? start
+    }
+
+    private func timeDateToMinutes(_ date: Date) -> Int {
+        let components = Calendar.current.dateComponents([.hour, .minute], from: date)
+        let hour = components.hour ?? 0
+        let minute = components.minute ?? 0
+        return min(max(hour * 60 + minute, 0), 1439)
+    }
+
+    private var hasCalendarAccess: Bool {
+        calendarManager.authorizationStatus == .fullAccess || calendarManager.authorizationStatus == .writeOnly
+    }
+
+    private func calendarModeRow(_ calendar: EKCalendar) -> some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(Color(nsColor: calendar.color))
+                .frame(width: 8, height: 8)
+
+            Text(calendar.title)
+                .font(.body)
+                .lineLimit(1)
+
+            Spacer()
+
+            Picker("", selection: calendarModeBinding(for: calendar)) {
+                ForEach(CalendarVisibilityMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 135)
+        }
+    }
+
+    private func calendarModeBinding(for calendar: EKCalendar) -> Binding<CalendarVisibilityMode> {
+        Binding(
+            get: { calendarManager.visibilityMode(for: calendar) },
+            set: { calendarManager.setVisibilityMode($0, for: calendar.calendarIdentifier) }
+        )
+    }
+
     func clearCompletedTasks() {
         let completed = allTasks.filter { $0.isCompleted }
         for task in completed {
@@ -209,4 +414,5 @@ struct SettingsView: View {
 
 #Preview {
     SettingsView()
+        .environmentObject(CalendarManager())
 }

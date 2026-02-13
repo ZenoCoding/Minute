@@ -1,24 +1,21 @@
 
 import SwiftUI
-import EventKit
 import SwiftData
 
 struct MenubarView: View {
     @EnvironmentObject var calendarManager: CalendarManager
-    @Environment(\.modelContext) private var modelContext
     
     // Query for active tasks
     @Query(filter: #Predicate<TaskItem> { !$0.isCompleted }, sort: \TaskItem.orderIndex)
     private var allTasks: [TaskItem]
     
-    var upcomingEvents: [EKEvent] {
+    var highlightedEvents: [CalendarHighlight] {
         let now = Date()
-        let all = calendarManager.events.filter { $0.endDate > now }
-        return Array(all.prefix(5)) // Show top 5
+        return calendarManager.highlights(for: now, now: now)
     }
     
-    var nextEvent: EKEvent? {
-        upcomingEvents.first
+    var nextEvent: CalendarHighlight? {
+        highlightedEvents.first
     }
     
     private let timeFormatter: DateFormatter = {
@@ -44,9 +41,9 @@ struct MenubarView: View {
                             .fontWeight(.medium)
                             .lineLimit(2)
                         
-                        Text(timeFormatter.string(from: event.startDate))
+                        Text(event.isAllDay ? "All Day" : timeFormatter.string(from: event.startDate))
                             .font(.caption)
-                            .foregroundStyle(Color(event.calendar.color))
+                            .foregroundStyle(Color(nsColor: event.calendarColor))
                     }
                     Spacer()
                 }
@@ -54,7 +51,7 @@ struct MenubarView: View {
                 .padding(.vertical, 12)
                 .background(Color(NSColor.controlBackgroundColor).opacity(0.5)) // Subtle highlight for active
             } else {
-                Text("No upcoming events")
+                Text("No key events")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding()
@@ -68,10 +65,10 @@ struct MenubarView: View {
                 VStack(spacing: 6) {
                     Spacer().frame(height: 8)
                     
-                    if upcomingEvents.count > 1 {
-                        ForEach(upcomingEvents.dropFirst(), id: \.eventIdentifier) { event in
+                    if highlightedEvents.count > 1 {
+                        ForEach(highlightedEvents.dropFirst()) { event in
                             HStack(alignment: .firstTextBaseline) {
-                                Text(timeFormatter.string(from: event.startDate))
+                                Text(event.isAllDay ? "All Day" : timeFormatter.string(from: event.startDate))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .frame(width: 60, alignment: .leading)
@@ -90,7 +87,7 @@ struct MenubarView: View {
                     // 3. Top Tasks
                     let topTasks = Array(allTasks.prefix(3))
                     if !topTasks.isEmpty {
-                        if upcomingEvents.count > 1 {
+                        if highlightedEvents.count > 1 {
                              Divider()
                                 .opacity(0.3)
                                 .padding(.vertical, 4)
