@@ -64,21 +64,44 @@ class CalendarManager: ObservableObject {
     static let includeSpecialDaysKey = "calendar_highlight_include_special_days"
     static let includeRecurringMeetingsKey = "calendar_highlight_include_recurring_meetings"
     static let calendarVisibilityModePrefix = "calendar_visibility_mode_"
+    private static let refreshIntervalSeconds: TimeInterval = 300
 
     private let store = EKEventStore()
     private let defaults: UserDefaults
+    private var refreshTimer: AnyCancellable?
+    private var storeChangeObserver: AnyCancellable?
+    private var appActiveObserver: AnyCancellable?
+    private var lastFetchDate: Date?
     @Published var events: [EKEvent] = []
     @Published var authorizationStatus: EKAuthorizationStatus = .notDetermined
+
+    var canReadEvents: Bool {
+        authorizationStatus == .fullAccess
+    }
+
+    var canWriteEvents: Bool {
+        authorizationStatus == .fullAccess || authorizationStatus == .writeOnly
+    }
     
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        configureObservers()
         checkStatus()
     }
     
-    func checkStatus() {
+    deinit {
+        refreshTimer?.cancel()
+        storeChangeObserver?.cancel()
+        appActiveObserver?.cancel()
+    }
+    
+    func checkStatus(fetchIfReadable: Bool = true) {
         self.authorizationStatus = EKEventStore.authorizationStatus(for: .event)
-        if self.authorizationStatus == .fullAccess || self.authorizationStatus == .writeOnly {
+        if canReadEvents {
+            guard fetchIfReadable else { return }
             fetchEvents()
+        } else if !events.isEmpty {
+            events = []
         }
     }
     
@@ -97,19 +120,85 @@ class CalendarManager: ObservableObject {
             }
         }
     }
+
+    @discardableResult
+    func createQuickEvent(
+        title: String,
+        date: Date?,
+        duration: TimeInterval?,
+        hasExplicitTime: Bool
+    ) -> Bool {
+        checkStatus(fetchIfReadable: false)
+        guard canWriteEvents else { return false }
+
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return false }
+
+        let writableCalendars = store.calendars(for: .event).filter(\.allowsContentModifications)
+        guard let targetCalendar = store.defaultCalendarForNewEvents ?? writableCalendars.first else {
+            return false
+        }
+
+        let calendar = Calendar.current
+        let anchorDate = date ?? Date()
+        let event = EKEvent(eventStore: store)
+        event.title = trimmedTitle
+        event.calendar = targetCalendar
+
+        if hasExplicitTime {
+            let eventDuration = max(60, duration ?? 3600)
+            event.startDate = anchorDate
+            event.endDate = anchorDate.addingTimeInterval(eventDuration)
+            event.isAllDay = false
+        } else {
+            let startOfDay = calendar.startOfDay(for: anchorDate)
+            let daySpan: Int = {
+                guard let duration else { return 1 }
+                return max(1, Int(ceil(duration / 86_400)))
+            }()
+            let endOfEvent = calendar.date(byAdding: .day, value: daySpan, to: startOfDay) ?? startOfDay.addingTimeInterval(86_400)
+            event.startDate = startOfDay
+            event.endDate = endOfEvent
+            event.isAllDay = true
+        }
+
+        do {
+            try store.save(event, span: .thisEvent, commit: true)
+            if canReadEvents {
+                fetchEvents(anchorDate: Date())
+            }
+            return true
+        } catch {
+            print("Failed to save event: \(error)")
+            return false
+        }
+    }
     
-    func fetchEvents() {
+    func fetchEvents(anchorDate: Date = Date()) {
+        guard canReadEvents else {
+            events = []
+            return
+        }
+
         let calendars = store.calendars(for: .event)
+        guard !calendars.isEmpty else {
+            events = []
+            lastFetchDate = anchorDate
+            return
+        }
         
-        // Fetch for Today and Tomorrow
-        let now = Date()
-        let startOfDay = Calendar.current.startOfDay(for: now)
-        let endOfTomorrow = Calendar.current.date(byAdding: .day, value: 2, to: startOfDay)!
+        // Keep a 4-day rolling window (yesterday + today + tomorrow + next day)
+        // so UI transitions around midnight do not drop upcoming events.
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: anchorDate)
+        let rangeStart = calendar.date(byAdding: .day, value: -1, to: startOfDay) ?? startOfDay
+        let rangeEnd = calendar.date(byAdding: .day, value: 3, to: startOfDay) ?? startOfDay
         
-        let predicate = store.predicateForEvents(withStart: startOfDay, end: endOfTomorrow, calendars: calendars)
+        let predicate = store.predicateForEvents(withStart: rangeStart, end: rangeEnd, calendars: calendars)
         
         let fetchedEvents = store.events(matching: predicate)
         self.events = fetchedEvents.sorted { $0.startDate < $1.startDate }
+        self.lastFetchDate = anchorDate
     }
     
     // Helper to group events by day or interleave
@@ -118,17 +207,57 @@ class CalendarManager: ObservableObject {
     }
 
     func todayEvents(for date: Date, now: Date) -> [EKEvent] {
+        events(on: date, now: now, includePast: false)
+    }
+
+    func tomorrowEvents(from date: Date, now: Date) -> [EKEvent] {
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: date)
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: startOfDay) ?? startOfDay
+        return events(on: tomorrow, now: now, includePast: true)
+    }
+
+    func events(on date: Date, now: Date, includePast: Bool) -> [EKEvent] {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
         let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay) ?? startOfDay
 
         return events
             .filter { event in
-                event.endDate > now &&
                 event.startDate < endOfDay &&
-                event.endDate > startOfDay
+                event.endDate > startOfDay &&
+                (includePast || !calendar.isDateInToday(date) || event.endDate > now)
             }
-            .sorted { $0.startDate < $1.startDate }
+            .sorted(by: sortEventsByDayOrder)
+    }
+
+    func nextEvent(after now: Date) -> EKEvent? {
+        let upcoming = events.filter { $0.endDate > now }
+        let upcomingTimed = upcoming.filter { !$0.isAllDay }
+
+        if let nextTimed = upcomingTimed.sorted(by: sortEventsByDayOrder).first {
+            return nextTimed
+        }
+
+        return upcoming.sorted(by: sortEventsByDayOrder).first
+    }
+
+    func busySeconds(on date: Date, now: Date) -> TimeInterval {
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: date)
+        let endOfDay = calendar.date(byAdding: .day, value: 1, to: startOfDay) ?? startOfDay
+        let lowerBound = calendar.isDateInToday(date) ? max(now, startOfDay) : startOfDay
+        guard endOfDay > lowerBound else { return 0 }
+
+        let dayRange = DateInterval(start: lowerBound, end: endOfDay)
+        let clipped = events(on: date, now: now, includePast: false).compactMap { event -> DateInterval? in
+            let start = max(event.startDate, dayRange.start)
+            let end = min(event.endDate, dayRange.end)
+            guard end > start else { return nil }
+            return DateInterval(start: start, end: end)
+        }
+
+        return mergeIntervals(clipped).reduce(0) { $0 + $1.duration }
     }
 
     func highlights(for date: Date, now: Date) -> [CalendarHighlight] {
@@ -235,6 +364,24 @@ class CalendarManager: ObservableObject {
         return merged
     }
 
+    private func sortEventsByDayOrder(_ lhs: EKEvent, _ rhs: EKEvent) -> Bool {
+        if lhs.isAllDay != rhs.isAllDay {
+            return lhs.isAllDay && !rhs.isAllDay
+        }
+
+        if lhs.startDate != rhs.startDate {
+            return lhs.startDate < rhs.startDate
+        }
+
+        if lhs.endDate != rhs.endDate {
+            return lhs.endDate < rhs.endDate
+        }
+
+        let lhsTitle = lhs.title ?? ""
+        let rhsTitle = rhs.title ?? ""
+        return lhsTitle.localizedCaseInsensitiveCompare(rhsTitle) == .orderedAscending
+    }
+
     private enum HighlightDisposition {
         case normal
         case specialDay
@@ -277,7 +424,7 @@ class CalendarManager: ObservableObject {
 
     private func isSpecialDayEvent(_ event: EKEvent) -> Bool {
         let specialKeywords = [
-            "birthday", "birthdays", "holiday", "anniversary", "vacation", "day off"
+            "birthday", "birthdays", "holiday", "anniversary", "vacation", "day off", "valentine"
         ]
         let calendarKeywords = [
             "birthday", "birthdays", "holiday", "holidays", "special days"
@@ -338,5 +485,41 @@ class CalendarManager: ObservableObject {
 
     private func visibilityModeKey(for calendarIdentifier: String) -> String {
         "\(Self.calendarVisibilityModePrefix)\(calendarIdentifier)"
+    }
+
+    private func configureObservers() {
+        refreshTimer = Timer.publish(every: Self.refreshIntervalSeconds, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] date in
+                self?.refreshIfNeeded(force: false, now: date)
+            }
+
+        storeChangeObserver = NotificationCenter.default.publisher(for: .EKEventStoreChanged)
+            .sink { [weak self] _ in
+                self?.refreshIfNeeded(force: true, now: Date())
+            }
+
+        appActiveObserver = NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                self?.refreshIfNeeded(force: true, now: Date())
+            }
+    }
+
+    private func refreshIfNeeded(force: Bool, now: Date) {
+        checkStatus(fetchIfReadable: false)
+        guard canReadEvents else { return }
+
+        if force || shouldRefresh(for: now) {
+            fetchEvents(anchorDate: now)
+        }
+    }
+
+    private func shouldRefresh(for now: Date) -> Bool {
+        guard let lastFetchDate else { return true }
+        let calendar = Calendar.current
+        if !calendar.isDate(lastFetchDate, inSameDayAs: now) {
+            return true
+        }
+        return now.timeIntervalSince(lastFetchDate) >= Self.refreshIntervalSeconds
     }
 }

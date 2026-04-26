@@ -96,6 +96,10 @@ struct SettingsView: View {
                         calendarManager.requestAccess()
                     }
                     .buttonStyle(.bordered)
+                } else if calendarManager.authorizationStatus == .writeOnly {
+                    Text("Calendar is set to Add Only. Switch to Full Access in System Settings to configure and preview highlights.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 } else {
                     Text("Calendar access is off. Enable calendar access in System Settings to configure highlight filters.")
                         .font(.caption)
@@ -342,7 +346,7 @@ struct SettingsView: View {
     }
 
     private var hasCalendarAccess: Bool {
-        calendarManager.authorizationStatus == .fullAccess || calendarManager.authorizationStatus == .writeOnly
+        calendarManager.canReadEvents
     }
 
     private func calendarModeRow(_ calendar: EKCalendar) -> some View {

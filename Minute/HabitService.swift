@@ -21,10 +21,10 @@ class HabitService {
     func checkAndResetHabits() {
         print("🔄 Checking recurring tasks...")
         
-        // Fetch all completed, recurring tasks
+        // Fetch all recurring tasks so we can both reset cycles and normalize due dates.
         let descriptor = FetchDescriptor<TaskItem>(
             predicate: #Predicate<TaskItem> { task in
-                task.isRecurring == true && task.isCompleted == true
+                task.isRecurring == true
             }
         )
         
@@ -34,9 +34,16 @@ class HabitService {
         let now = Date()
         let startOfToday = calendar.startOfDay(for: now)
         
+        var normalizedDueDateCount = 0
         var resetCount = 0
         
         for task in tasks {
+            if let dueDate = task.dueDate, hasSpecificTime(dueDate, calendar: calendar) {
+                task.dueDate = calendar.startOfDay(for: dueDate)
+                normalizedDueDateCount += 1
+            }
+
+            guard task.isCompleted else { continue }
             guard let completedDate = task.completedAt else { continue }
             guard let interval = task.recurrenceInterval else { continue }
             
@@ -69,11 +76,16 @@ class HabitService {
             }
         }
         
-        if resetCount > 0 {
+        if resetCount > 0 || normalizedDueDateCount > 0 {
             try? modelContext.save()
-            print("✅ Reset \(resetCount) recurring tasks.")
+            print("✅ Reset \(resetCount) recurring tasks, normalized \(normalizedDueDateCount) due dates.")
         } else {
             print("🌱 No recurring tasks needed reset.")
         }
+    }
+
+    private func hasSpecificTime(_ date: Date, calendar: Calendar) -> Bool {
+        let components = calendar.dateComponents([.hour, .minute, .second], from: date)
+        return (components.hour ?? 0) != 0 || (components.minute ?? 0) != 0 || (components.second ?? 0) != 0
     }
 }

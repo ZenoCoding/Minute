@@ -59,16 +59,15 @@ struct DatePickerPopover: View {
             // Presets
             HStack {
                 Button("Today") {
-                    selection = Date()
+                    selection = DueDateSupport.presetToday()
                     isPresented = false
                 }
                 Button("Tomorrow") {
-                    selection = Calendar.current.date(byAdding: .day, value: 1, to: Date())
+                    selection = DueDateSupport.presetTomorrow()
                     isPresented = false
                 }
                 Button("Weekend") {
-                    let nextSat = Calendar.current.nextDate(after: Date(), matching: DateComponents(weekday: 7), matchingPolicy: .nextTime)
-                    selection = nextSat
+                    selection = DueDateSupport.presetNextSaturday()
                     isPresented = false
                 }
             }

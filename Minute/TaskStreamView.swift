@@ -42,7 +42,7 @@ struct TaskStreamView: View {
     }
 
     private var hasCalendarAccess: Bool {
-        calendarManager.authorizationStatus == .fullAccess || calendarManager.authorizationStatus == .writeOnly
+        calendarManager.canReadEvents
     }
 
     private var capacityTasks: [TaskItem] {
@@ -201,6 +201,31 @@ struct TaskStreamView: View {
                                     .padding(.horizontal, 4)
                                 }
 
+                                if section.title == "Today",
+                                   dayCapacitySnapshot.overloadSeconds == 0,
+                                   dayCapacitySnapshot.spareSeconds >= minimumPullForwardSpareSeconds {
+                                    HStack(spacing: 8) {
+                                        Label("Free \(formatHours(dayCapacitySnapshot.spareSeconds))", systemImage: "sparkles")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+
+                                        Spacer()
+
+                                        Button("Suggest Pull Forward") {
+                                            preparePullForwardSuggestion()
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+
+                                        if let pendingPullForwardSuggestion {
+                                            Text("Adds \(pendingPullForwardSuggestion.taskCount) (\(formatHours(pendingPullForwardSuggestion.pulledForwardSeconds))).")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .padding(.horizontal, 4)
+                                }
+
                                 if section.title == "Today", let capacityMessage {
                                     Text(capacityMessage)
                                         .font(.caption)
@@ -260,10 +285,12 @@ struct TaskStreamView: View {
             .onChange(of: allTasks) { _, _ in
                 scheduleSyncTasks()
                 pendingDeferralSuggestion = nil
+                pendingPullForwardSuggestion = nil
             }
             .onChange(of: allProjects) { _, _ in
                 scheduleSyncTasks()
                 pendingDeferralSuggestion = nil
+                pendingPullForwardSuggestion = nil
             }
             .onChange(of: allCompletedTasks) { _, _ in
                 syncCompleted()
@@ -273,6 +300,7 @@ struct TaskStreamView: View {
                 scheduleSyncTasks(delay: 0)
                 syncCompleted()
                 pendingDeferralSuggestion = nil
+                pendingPullForwardSuggestion = nil
             }
             .onDisappear {
                 syncWorkItem?.cancel()
@@ -294,6 +322,18 @@ struct TaskStreamView: View {
                 Text("Move \(suggestion.taskCount) task\(suggestion.taskCount == 1 ? "" : "s") to the next planning day and free about \(formatHours(suggestion.deferredSeconds)).")
             }
         }
+        .confirmationDialog("Pull tasks into this planning day?", isPresented: $showPullForwardConfirmation) {
+            if let suggestion = pendingPullForwardSuggestion {
+                Button("Pull \(suggestion.taskCount) Task\(suggestion.taskCount == 1 ? "" : "s") Forward") {
+                    applyPullForwardSuggestion(suggestion)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if let suggestion = pendingPullForwardSuggestion {
+                Text("Move \(suggestion.taskCount) task\(suggestion.taskCount == 1 ? "" : "s") into this planning day and fill about \(formatHours(suggestion.pulledForwardSeconds)).")
+            }
+        }
     }
     
     // We keep this for the DropDelegate to have a binding for live reordering
@@ -303,7 +343,9 @@ struct TaskStreamView: View {
     @State private var editingTask: TaskItem?
     @State private var capacityNow = Date()
     @State private var pendingDeferralSuggestion: DayCapacityDeferralSuggestion?
+    @State private var pendingPullForwardSuggestion: DayCapacityPullForwardSuggestion?
     @State private var showDeferralConfirmation = false
+    @State private var showPullForwardConfirmation = false
     @State private var capacityMessage: String?
     
     // Recent Archive
@@ -312,6 +354,7 @@ struct TaskStreamView: View {
     
     @State private var recentCompleted: [StreamItem] = []
     @State private var syncWorkItem: DispatchWorkItem?
+    private let minimumPullForwardSpareSeconds: TimeInterval = 20 * 60
 
     private func scheduleSyncTasks(delay: TimeInterval = 0.05) {
         syncWorkItem?.cancel()
@@ -385,6 +428,7 @@ struct TaskStreamView: View {
     }
 
     private func prepareDeferralSuggestion() {
+        pendingPullForwardSuggestion = nil
         let suggestion = dayCapacityService.suggestedDeferrals(
             planningWindow: activePlanningWindow,
             tasks: capacityTasks,
@@ -419,6 +463,49 @@ struct TaskStreamView: View {
         }
 
         pendingDeferralSuggestion = nil
+    }
+
+    private func preparePullForwardSuggestion() {
+        pendingDeferralSuggestion = nil
+        let suggestion = dayCapacityService.suggestedPullForward(
+            planningWindow: activePlanningWindow,
+            tasks: capacityTasks,
+            availableSpareSeconds: dayCapacitySnapshot.spareSeconds,
+            lookAheadWindowEnd: weekPlanningWindowEnd,
+            useFallbackDuration: useFallbackDuration,
+            fallbackDurationMinutes: fallbackDurationMinutes
+        )
+
+        pendingPullForwardSuggestion = suggestion
+
+        guard suggestion != nil else {
+            showCapacityMessage("No upcoming tasks fit this planning day.")
+            return
+        }
+
+        showPullForwardConfirmation = true
+    }
+
+    private func applyPullForwardSuggestion(_ suggestion: DayCapacityPullForwardSuggestion) {
+        let sourceWindow = activePlanningWindow
+        let taskIDs = Set(suggestion.taskIDs)
+        for task in allTasks where taskIDs.contains(task.id) {
+            task.dueDate = dayCapacityService.pulledDateToCurrentPlanningDay(
+                from: task.dueDate,
+                currentPlanningWindow: sourceWindow,
+                now: capacityNow
+            )
+        }
+
+        do {
+            try modelContext.save()
+            scheduleSyncTasks()
+            showCapacityMessage("Pulled \(suggestion.taskCount) task\(suggestion.taskCount == 1 ? "" : "s") into this planning day.")
+        } catch {
+            showCapacityMessage("Unable to pull tasks forward right now.")
+        }
+
+        pendingPullForwardSuggestion = nil
     }
 
     private func showCapacityMessage(_ message: String) {
@@ -560,15 +647,17 @@ struct TaskStreamView: View {
         var week: [StreamItem] = []
         var backlog: [StreamItem] = []
 
-        let todayEnd = activePlanningWindow.end
-        let tomorrowEnd = nextPlanningWindow.end
-        let weekEnd = weekPlanningWindowEnd
+        let calendar = Calendar.current
+        let todayStart = calendar.startOfDay(for: capacityNow)
+        let tomorrowStart = calendar.date(byAdding: .day, value: 1, to: todayStart) ?? todayStart
+        let dayAfterTomorrowStart = calendar.date(byAdding: .day, value: 2, to: todayStart) ?? tomorrowStart
+        let weekEnd = calendar.date(byAdding: .day, value: 7, to: todayStart) ?? dayAfterTomorrowStart
         
         for item in orderedTasks {
             if let date = item.task.dueDate {
-                if date < todayEnd {
+                if date < tomorrowStart {
                     today.append(item)
-                } else if date < tomorrowEnd {
+                } else if date < dayAfterTomorrowStart {
                     tomorrow.append(item)
                 } else if date < weekEnd {
                     week.append(item)
@@ -605,11 +694,13 @@ struct InlineTaskComposer: View {
     let activeProjects: [Project]
     let capacitySummaryForDate: (Date) -> (text: String, isOverloaded: Bool)?
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject var calendarManager: CalendarManager
     
     @State private var text: String = ""
     @State private var detectedProject: Project?
     @State private var detectedDuration: TimeInterval?
     @State private var detectedDate: Date?
+    @State private var detectedIsEvent = false
     @State private var showDatePicker = false
     @State private var showProjectPicker = false
     @State private var showDurationPicker = false
@@ -643,6 +734,10 @@ struct InlineTaskComposer: View {
         selectedDate ?? detectedDate
     }
 
+    var effectiveIsEvent: Bool {
+        detectedIsEvent
+    }
+
     private static let shortDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM d"
@@ -657,7 +752,7 @@ struct InlineTaskComposer: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.secondary)
                 
-                TextField("Add a task...", text: $text)
+                TextField("Add a task or event...", text: $text)
                     .textFieldStyle(.plain)
                     .font(.body)
                     .onSubmit {
@@ -686,6 +781,7 @@ struct InlineTaskComposer: View {
                                 detectedDuration = result.duration
                                 detectedDate = result.date
                                 detectedRecurrence = result.recurrenceInterval
+                                detectedIsEvent = result.isEvent
                             }
                         }
                     }
@@ -693,63 +789,78 @@ struct InlineTaskComposer: View {
             .padding(10)
             
             // "Dropdowns Underneath" / Metadata Bar
-            if !text.isEmpty || effectiveProject != nil {
+            if !text.isEmpty || (!effectiveIsEvent && effectiveProject != nil) {
                 HStack(spacing: 4) {
-                    
-                    // 1. Project Selector
-                    Button {
-                        showProjectPicker = true
-                    } label: {
+                    if effectiveIsEvent {
                         ComposerMenuLabel {
                             HStack(spacing: 4) {
-                                if let project = effectiveProject {
-                                    if let icon = project.area?.iconName {
-                                        Image(systemName: icon)
-                                            .font(.subheadline)
-                                    }
-                                    Text(project.name)
-                                        .font(.caption)
-                                        .fontWeight(.medium)
-                                        .lineLimit(1)
-                                } else {
-                                    Text("Select Project")
-                                        .font(.caption)
-                                        .lineLimit(1)
-                                }
+                                Image(systemName: "calendar.badge.plus")
+                                    .font(.caption)
+                                    .foregroundStyle(.blue)
+                                Text("Event")
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+                                    .foregroundStyle(.blue)
                             }
                         }
                     }
-                    .buttonStyle(.plain)
-                    .popover(isPresented: $showProjectPicker, arrowEdge: .bottom) {
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 4) {
-                                ForEach(activeProjects) { project in
-                                    Button {
-                                        selectedProject = project
-                                        showProjectPicker = false
-                                    } label: {
-                                        HStack {
-                                            if let icon = project.area?.iconName {
-                                                Image(systemName: icon)
-                                                    .foregroundStyle(Color(hex: project.area?.themeColor ?? "") ?? .secondary)
-                                            }
-                                            Text(project.name)
-                                            Spacer()
-                                            if effectiveProject?.id == project.id {
-                                                Image(systemName: "checkmark")
-                                                    .font(.caption)
-                                            }
+                    
+                    if !effectiveIsEvent {
+                        // 1. Project Selector
+                        Button {
+                            showProjectPicker = true
+                        } label: {
+                            ComposerMenuLabel {
+                                HStack(spacing: 4) {
+                                    if let project = effectiveProject {
+                                        if let icon = project.area?.iconName {
+                                            Image(systemName: icon)
+                                                .font(.subheadline)
                                         }
-                                        .padding(.vertical, 6)
-                                        .padding(.horizontal, 8)
-                                        .contentShape(Rectangle())
+                                        Text(project.name)
+                                            .font(.caption)
+                                            .fontWeight(.medium)
+                                            .lineLimit(1)
+                                    } else {
+                                        Text("Select Project")
+                                            .font(.caption)
+                                            .lineLimit(1)
                                     }
-                                    .buttonStyle(.plain)
                                 }
                             }
-                            .padding()
                         }
-                        .frame(width: 200, height: 200)
+                        .buttonStyle(.plain)
+                        .popover(isPresented: $showProjectPicker, arrowEdge: .bottom) {
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    ForEach(activeProjects) { project in
+                                        Button {
+                                            selectedProject = project
+                                            showProjectPicker = false
+                                        } label: {
+                                            HStack {
+                                                if let icon = project.area?.iconName {
+                                                    Image(systemName: icon)
+                                                        .foregroundStyle(Color(hex: project.area?.themeColor ?? "") ?? .secondary)
+                                                }
+                                                Text(project.name)
+                                                Spacer()
+                                                if effectiveProject?.id == project.id {
+                                                    Image(systemName: "checkmark")
+                                                        .font(.caption)
+                                                }
+                                            }
+                                            .padding(.vertical, 6)
+                                            .padding(.horizontal, 8)
+                                            .contentShape(Rectangle())
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                .padding()
+                            }
+                            .frame(width: 200, height: 200)
+                        }
                     }
                     
                     // 2. Due Date Selector (Popover with Calendar)
@@ -769,7 +880,7 @@ struct InlineTaskComposer: View {
                                         .foregroundStyle(isToday(date) ? .green : .primary)
                                         .lineLimit(1)
 
-                                    if let capacitySummary = capacitySummaryForDate(date) {
+                                    if !effectiveIsEvent, let capacitySummary = capacitySummaryForDate(date) {
                                         Text(capacitySummary.text)
                                             .font(.caption2)
                                             .fontWeight(.semibold)
@@ -786,12 +897,10 @@ struct InlineTaskComposer: View {
                         VStack(spacing: 12) {
                             // Presets
                             HStack {
-                                Button("Today") { selectedDate = Date(); showDatePicker = false }
-                                Button("Tomorrow") { selectedDate = Calendar.current.date(byAdding: .day, value: 1, to: Date()); showDatePicker = false }
+                                Button("Today") { selectedDate = DueDateSupport.presetToday(); showDatePicker = false }
+                                Button("Tomorrow") { selectedDate = DueDateSupport.presetTomorrow(); showDatePicker = false }
                                 Button("Weekend") {
-                                    // Calculate next Saturday
-                                    let nextSat = Calendar.current.nextDate(after: Date(), matching: DateComponents(weekday: 7), matchingPolicy: .nextTime)
-                                    selectedDate = nextSat
+                                    selectedDate = DueDateSupport.presetNextSaturday()
                                     showDatePicker = false
                                 }
                             }
@@ -896,54 +1005,56 @@ struct InlineTaskComposer: View {
                         .frame(width: 160)
                     }
                     
-                    // 4. Recurrence Selector
-                    Button {
-                        showRecurrencePicker = true
-                    } label: {
-                        ComposerMenuLabel {
-                            HStack(spacing: 4) {
-                                Image(systemName: "repeat")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                
-                                if let interval = effectiveRecurrence {
-                                    Text(interval.capitalized)
+                    if !effectiveIsEvent {
+                        // 4. Recurrence Selector
+                        Button {
+                            showRecurrencePicker = true
+                        } label: {
+                            ComposerMenuLabel {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "repeat")
                                         .font(.caption)
-                                        .fontWeight(.medium)
-                                        .foregroundStyle(.blue)
-                                        .lineLimit(1)
+                                        .foregroundStyle(.secondary)
+                                    
+                                    if let interval = effectiveRecurrence {
+                                        Text(interval.capitalized)
+                                            .font(.caption)
+                                            .fontWeight(.medium)
+                                            .foregroundStyle(.blue)
+                                            .lineLimit(1)
+                                    }
                                 }
                             }
                         }
-                    }
-                    .buttonStyle(.plain)
-                    .popover(isPresented: $showRecurrencePicker, arrowEdge: .bottom) {
-                        VStack(spacing: 4) {
-                            Button { selectedRecurrence = nil; showRecurrencePicker = false } label: {
-                                Label("None", systemImage: "xmark.circle")
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(8)
+                        .buttonStyle(.plain)
+                        .popover(isPresented: $showRecurrencePicker, arrowEdge: .bottom) {
+                            VStack(spacing: 4) {
+                                Button { selectedRecurrence = nil; showRecurrencePicker = false } label: {
+                                    Label("None", systemImage: "xmark.circle")
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(8)
+                                }
+                                .buttonStyle(.plain)
+                                
+                                Divider()
+                                
+                                Button { selectedRecurrence = "daily"; showRecurrencePicker = false } label: {
+                                    Label("Daily", systemImage: "sun.max")
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(8)
+                                }
+                                .buttonStyle(.plain)
+                                
+                                Button { selectedRecurrence = "weekly"; showRecurrencePicker = false } label: {
+                                    Label("Weekly", systemImage: "calendar")
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(8)
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
-                            
-                            Divider()
-                            
-                            Button { selectedRecurrence = "daily"; showRecurrencePicker = false } label: {
-                                Label("Daily", systemImage: "sun.max")
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(8)
-                            }
-                            .buttonStyle(.plain)
-                            
-                            Button { selectedRecurrence = "weekly"; showRecurrencePicker = false } label: {
-                                Label("Weekly", systemImage: "calendar")
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(8)
-                            }
-                            .buttonStyle(.plain)
+                            .padding(8)
+                            .frame(width: 140)
                         }
-                        .padding(8)
-                        .frame(width: 140)
                     }
                     
                     Spacer()
@@ -972,11 +1083,26 @@ struct InlineTaskComposer: View {
     }
     
     private func createTask() {
-        guard !text.isEmpty, let project = effectiveProject else { return }
-        
-        // Final Parsing Logic
-        let result = SmartInputParser.parse(text: text, projects: activeProjects)
-        let finalTitle = result.cleanTitle.isEmpty ? text : result.cleanTitle
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let result = SmartInputParser.parse(text: trimmed, projects: activeProjects)
+        let finalTitle = result.cleanTitle.isEmpty ? trimmed : result.cleanTitle
+
+        if result.isEvent {
+            let createdEvent = calendarManager.createQuickEvent(
+                title: finalTitle,
+                date: effectiveDate ?? result.date,
+                duration: effectiveDuration ?? result.duration,
+                hasExplicitTime: result.dateHasExplicitTime
+            )
+            if createdEvent {
+                resetComposer()
+                return
+            }
+        }
+
+        guard let project = effectiveProject else { return }
         
         let task = TaskItem(
             title: finalTitle,
@@ -1007,6 +1133,7 @@ struct InlineTaskComposer: View {
         detectedDuration = nil
         detectedDate = nil
         detectedRecurrence = nil
+        detectedIsEvent = false
         selectedRecurrence = nil
     }
     
@@ -1369,90 +1496,109 @@ struct TaskStreamRow: View {
     }
 }
 
-private struct ScheduleCompactHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+private enum ScheduleExpandedFilter: String, CaseIterable, Identifiable {
+    case today = "Today"
+    case tomorrow = "Tomorrow"
+    case both = "Both"
 
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
+    var id: String { rawValue }
 }
 
 struct ScheduleHighlightsCard: View {
+    let now: Date
     let highlights: [CalendarHighlight]
     let todayEvents: [EKEvent]
-    let onOpenCalendar: () -> Void
+    let tomorrowEvents: [EKEvent]
+    let nextEvent: EKEvent?
+    let todayBusySeconds: TimeInterval
+    let tomorrowBusySeconds: TimeInterval
+    let onOpenCalendarDay: (Date) -> Void
 
-    @State private var isHoveringCompact = false
-    @State private var isHoveringExpanded = false
-    @State private var isExpandedVisible = false
-    @State private var compactHeight: CGFloat = 0
-    @State private var closeWorkItem: DispatchWorkItem?
+    @State private var isExpanded = false
+    @State private var expandedFilter: ScheduleExpandedFilter = .both
 
-    var body: some View {
-        compactCard
-            .background(
-                GeometryReader { proxy in
-                    Color.clear.preference(key: ScheduleCompactHeightKey.self, value: proxy.size.height)
-                }
-            )
-            .onPreferenceChange(ScheduleCompactHeightKey.self) { compactHeight = $0 }
-            .onHover { hovering in
-                isHoveringCompact = hovering
-                updateExpandedVisibility()
-            }
-            .overlay(alignment: .topLeading) {
-                if isExpandedVisible && !todayEvents.isEmpty {
-                    expandedCard
-                        .padding(.top, compactHeight + 6)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                        .zIndex(5)
-                        .onHover { hovering in
-                            isHoveringExpanded = hovering
-                            updateExpandedVisibility()
-                        }
-                }
-            }
-            .onDisappear {
-                closeWorkItem?.cancel()
-            }
+    private var calendar: Calendar { .current }
+
+    private var tomorrowDate: Date {
+        calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now)) ?? now
     }
 
-    private var compactCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Schedule Highlights")
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
+    private var hasAnyEvents: Bool {
+        !todayEvents.isEmpty || !tomorrowEvents.isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Schedule Highlights")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+
+                    if let nextEvent {
+                        Text(nextEventDescription(for: nextEvent))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    } else {
+                        Text("No upcoming events in the next two days.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
 
                 Spacer()
 
-                Text("\(todayEvents.count)")
+                Button {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                        if !isExpanded {
+                            expandedFilter = preferredExpandedFilter
+                        }
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(isExpanded ? "Collapse" : "Full Schedule")
+                        Image(systemName: "chevron.down")
+                            .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                    }
                     .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.secondary.opacity(0.1), in: Capsule())
+                    .fontWeight(.semibold)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.secondary.opacity(0.12), in: Capsule())
+                }
+                .buttonStyle(.plain)
             }
 
-            if highlights.isEmpty {
-                Text("No key events coming up.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 4)
-            } else {
-                ForEach(highlights) { highlight in
-                    ScheduleHighlightRow(highlight: highlight)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ScheduleMetricPill(icon: "sun.max.fill", text: "Today \(todayEvents.count)")
+                    ScheduleMetricPill(icon: "moon.stars.fill", text: "Tomorrow \(tomorrowEvents.count)")
+                    ScheduleMetricPill(icon: "clock.fill", text: "\(formatBusyDuration(todayBusySeconds)) busy today")
+                    ScheduleMetricPill(icon: "clock.badge.checkmark.fill", text: "\(formatBusyDuration(tomorrowBusySeconds)) busy tomorrow")
                 }
             }
 
-            HStack {
-                Text(todayEvents.isEmpty ? "No remaining events today." : "Hover to view the full schedule.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Button("Open Calendar", action: onOpenCalendar)
+            compactPreview
+
+            if isExpanded {
+                expandedTimeline
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            if !isExpanded {
+                HStack {
+                    Text(collapsedFooterText)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                    Button("Open Calendar") {
+                        onOpenCalendarDay(now)
+                    }
                     .buttonStyle(.plain)
                     .font(.caption)
+                }
             }
         }
         .padding(10)
@@ -1463,54 +1609,254 @@ struct ScheduleHighlightsCard: View {
         )
     }
 
-    private var expandedCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Today's Schedule")
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                Spacer()
-                Button("Open Calendar", action: onOpenCalendar)
-                    .buttonStyle(.plain)
-                    .font(.caption)
+    @ViewBuilder
+    private var compactPreview: some View {
+        if !highlights.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(highlights.prefix(2))) { highlight in
+                    ScheduleHighlightRow(highlight: highlight)
+                }
             }
+        } else if !todayEvents.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(todayEvents.indices.prefix(2), id: \.self) { index in
+                    CalendarEventRow(event: todayEvents[index], referenceDate: now)
+                }
+            }
+        } else {
+            Text(compactTodayStatusText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 4)
+        }
+
+        HStack(spacing: 8) {
+            Text("Tomorrow")
+                .font(.caption2)
+                .fontWeight(.semibold)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.secondary.opacity(0.1), in: Capsule())
+
+            if let tomorrowFirst = tomorrowEvents.first {
+                Text(tomorrowPreviewText(for: tomorrowFirst))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else {
+                Text("No events yet.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+
+        let hiddenTodayCount = max(todayEvents.count - 2, 0)
+        let hiddenTomorrowCount = max(tomorrowEvents.count - 1, 0)
+        if hiddenTodayCount > 0 || hiddenTomorrowCount > 0 {
+            Text("+\(hiddenTodayCount) more today, +\(hiddenTomorrowCount) more tomorrow")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private var expandedTimeline: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Day", selection: $expandedFilter) {
+                ForEach(ScheduleExpandedFilter.allCases) { filter in
+                    Text(filter.rawValue).tag(filter)
+                }
+            }
+            .pickerStyle(.segmented)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(todayEvents, id: \.calendarItemIdentifier) { event in
-                        CalendarEventRow(event: event)
+                VStack(alignment: .leading, spacing: 10) {
+                    if expandedFilter == .today || expandedFilter == .both {
+                        timelineSection(
+                            title: "Today",
+                            events: todayEvents,
+                            busySeconds: todayBusySeconds,
+                            emptyState: "No remaining events today."
+                        )
+                    }
+
+                    if expandedFilter == .tomorrow || expandedFilter == .both {
+                        timelineSection(
+                            title: "Tomorrow",
+                            events: tomorrowEvents,
+                            busySeconds: tomorrowBusySeconds,
+                            emptyState: "No events tomorrow."
+                        )
                     }
                 }
             }
-            .frame(maxHeight: 250)
+            .frame(maxHeight: 320)
+
+            HStack(spacing: 8) {
+                Button("Open Today") {
+                    onOpenCalendarDay(now)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button("Open Tomorrow") {
+                    onOpenCalendarDay(tomorrowDate)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Spacer()
+            }
         }
         .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(0.15), radius: 12, x: 0, y: 6)
     }
 
-    private func updateExpandedVisibility() {
-        closeWorkItem?.cancel()
+    @ViewBuilder
+    private func timelineSection(
+        title: String,
+        events: [EKEvent],
+        busySeconds: TimeInterval,
+        emptyState: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
 
-        if isHoveringCompact || isHoveringExpanded {
-            withAnimation(.easeOut(duration: 0.12)) {
-                isExpandedVisible = true
+                Spacer()
+
+                Text("\(events.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.secondary.opacity(0.1), in: Capsule())
+
+                Text("\(formatBusyDuration(busySeconds)) busy")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
-            return
+
+            if events.isEmpty {
+                Text(emptyState)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(events.indices, id: \.self) { index in
+                    CalendarEventRow(event: events[index], referenceDate: title == "Today" ? now : nil)
+                }
+            }
+        }
+        .padding(8)
+        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func tomorrowPreviewText(for event: EKEvent) -> String {
+        let timeText = event.isAllDay ? "All Day" : event.startDate.formatted(date: .omitted, time: .shortened)
+        return "\(timeText) · \(event.title ?? "Untitled Event")"
+    }
+
+    private func nextEventDescription(for event: EKEvent) -> String {
+        let title = event.title ?? "Untitled Event"
+
+        if event.startDate <= now && event.endDate > now {
+            return "Happening now: \(title)"
         }
 
-        let workItem = DispatchWorkItem {
-            withAnimation(.easeOut(duration: 0.15)) {
-                isExpandedVisible = false
-            }
+        let offset = relativeOffsetText(to: event.startDate)
+        return offset.isEmpty ? "Next: \(title)" : "Next: \(title) \(offset)"
+    }
+
+    private func relativeOffsetText(to date: Date) -> String {
+        let interval = max(0, date.timeIntervalSince(now))
+        let formatter = DateComponentsFormatter()
+        formatter.unitsStyle = .abbreviated
+        formatter.maximumUnitCount = 2
+        if interval < 3600 {
+            formatter.allowedUnits = [.minute]
+        } else if interval < 86_400 {
+            formatter.allowedUnits = [.hour, .minute]
+        } else {
+            formatter.allowedUnits = [.day, .hour]
         }
-        closeWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: workItem)
+        let value = formatter.string(from: interval) ?? ""
+        return value.isEmpty ? "" : "(in \(value))"
+    }
+
+    private func formatBusyDuration(_ seconds: TimeInterval) -> String {
+        let totalMinutes = Int((seconds / 60).rounded())
+        guard totalMinutes > 0 else { return "0m" }
+
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+
+        if hours == 0 {
+            return "\(minutes)m"
+        }
+        if minutes == 0 {
+            return "\(hours)h"
+        }
+        return "\(hours)h \(minutes)m"
+    }
+
+    private var isTodayCleared: Bool {
+        todayEvents.isEmpty && !tomorrowEvents.isEmpty
+    }
+
+    private var compactTodayStatusText: String {
+        if isTodayCleared {
+            return "No more events today. Looking ahead to tomorrow."
+        }
+        return "No key events coming up today."
+    }
+
+    private var collapsedFooterText: String {
+        if hasAnyEvents {
+            if isTodayCleared {
+                let plural = tomorrowEvents.count == 1 ? "" : "s"
+                return "Today is wrapped. Tomorrow has \(tomorrowEvents.count) event\(plural)."
+            }
+            return "Expand to browse the full timeline."
+        }
+        return "Nothing scheduled right now."
+    }
+
+    private var preferredExpandedFilter: ScheduleExpandedFilter {
+        if !todayEvents.isEmpty && !tomorrowEvents.isEmpty {
+            return .both
+        }
+        if !todayEvents.isEmpty {
+            return .today
+        }
+        if !tomorrowEvents.isEmpty {
+            return .tomorrow
+        }
+        return .both
+    }
+}
+
+private struct ScheduleMetricPill: View {
+    let icon: String
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.caption2)
+            Text(text)
+                .font(.caption2)
+                .fontWeight(.medium)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color.secondary.opacity(0.1), in: Capsule())
+        .foregroundStyle(.secondary)
     }
 }
 
@@ -1588,6 +1934,7 @@ struct DragPreviewShape: Shape {
 
 struct CalendarEventRow: View {
     let event: EKEvent
+    var referenceDate: Date? = nil
     
     var body: some View {
         HStack(spacing: 12) {
@@ -1613,10 +1960,25 @@ struct CalendarEventRow: View {
                 .padding(.vertical, 2)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text(event.title)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(event.title)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+
+                    if let statusText = eventStatusText {
+                        Text(statusText)
+                            .font(.caption2)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(statusText == "Now" ? .green : .orange)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(
+                                (statusText == "Now" ? Color.green : Color.orange).opacity(0.15),
+                                in: Capsule()
+                            )
+                    }
+                }
                 
                 if let location = event.location, !location.isEmpty {
                     Text(location)
@@ -1630,5 +1992,20 @@ struct CalendarEventRow: View {
         .padding(8)
         .background(Color.primary.opacity(0.03))
         .cornerRadius(6)
+    }
+
+    private var eventStatusText: String? {
+        guard let referenceDate else { return nil }
+        guard !event.isAllDay else { return nil }
+        guard event.endDate > referenceDate else { return nil }
+
+        if event.startDate <= referenceDate && event.endDate > referenceDate {
+            return "Now"
+        }
+
+        let untilStart = event.startDate.timeIntervalSince(referenceDate)
+        guard untilStart > 0, untilStart <= 3600 else { return nil }
+        let minutes = max(1, Int((untilStart / 60).rounded(.up)))
+        return "in \(minutes)m"
     }
 }

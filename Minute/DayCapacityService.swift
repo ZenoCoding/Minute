@@ -125,6 +125,10 @@ struct DayCapacitySnapshot {
         max(0, requiredSecondsToday - availableSecondsToday)
     }
 
+    var spareSeconds: TimeInterval {
+        max(0, availableSecondsToday - requiredSecondsToday)
+    }
+
     var utilization: Double {
         guard availableSecondsToday > 0 else {
             return requiredSecondsToday > 0 ? 1.0 : 0.0
@@ -149,6 +153,12 @@ struct DayCapacityDeferralSuggestion {
     let taskIDs: [UUID]
     let taskCount: Int
     let deferredSeconds: TimeInterval
+}
+
+struct DayCapacityPullForwardSuggestion {
+    let taskIDs: [UUID]
+    let taskCount: Int
+    let pulledForwardSeconds: TimeInterval
 }
 
 struct DayCapacityService {
@@ -267,6 +277,101 @@ struct DayCapacityService {
         )
     }
 
+    func suggestedPullForward(
+        planningWindow: PlanningDayWindow,
+        tasks: [TaskItem],
+        availableSpareSeconds: TimeInterval,
+        lookAheadWindowEnd: Date,
+        useFallbackDuration: Bool,
+        fallbackDurationMinutes: Int
+    ) -> DayCapacityPullForwardSuggestion? {
+        guard availableSpareSeconds > 0 else { return nil }
+
+        let fallbackSeconds = TimeInterval(max(1, fallbackDurationMinutes) * 60)
+
+        let candidates: [(task: TaskItem, dueDate: Date?, duration: TimeInterval, noSpecificTime: Bool)] = tasks.compactMap { task in
+            guard !task.isCompleted else { return nil }
+            guard !task.isRecurring else { return nil }
+
+            if let dueDate = task.dueDate {
+                guard dueDate >= planningWindow.end && dueDate < lookAheadWindowEnd else { return nil }
+            }
+
+            let duration: TimeInterval
+            if let explicitDuration = normalizedDuration(task.estimatedDuration) {
+                duration = explicitDuration
+            } else if useFallbackDuration {
+                duration = fallbackSeconds
+            } else {
+                return nil
+            }
+
+            return (
+                task: task,
+                dueDate: task.dueDate,
+                duration: duration,
+                noSpecificTime: task.dueDate.map { !hasSpecificTime($0) } ?? true
+            )
+        }
+
+        guard !candidates.isEmpty else { return nil }
+
+        let ranked = candidates.sorted { lhs, rhs in
+            switch (lhs.dueDate, rhs.dueDate) {
+            case let (left?, right?):
+                if left != right {
+                    return left < right
+                }
+            case (nil, nil):
+                break
+            case (.some, nil):
+                return true
+            case (nil, .some):
+                return false
+            }
+
+            if lhs.noSpecificTime != rhs.noSpecificTime {
+                return lhs.noSpecificTime && !rhs.noSpecificTime
+            }
+
+            if lhs.duration != rhs.duration {
+                return lhs.duration < rhs.duration
+            }
+
+            return lhs.task.orderIndex < rhs.task.orderIndex
+        }
+
+        var selectedTaskIDs: [UUID] = []
+        var coveredSeconds: TimeInterval = 0
+        let overshootCap = max(availableSpareSeconds * 1.2, availableSpareSeconds + 15 * 60)
+
+        for candidate in ranked {
+            let nextCovered = coveredSeconds + candidate.duration
+            if nextCovered <= availableSpareSeconds {
+                selectedTaskIDs.append(candidate.task.id)
+                coveredSeconds = nextCovered
+                continue
+            }
+
+            // If nothing fits cleanly, allow one slight overshoot so the user still gets a useful action.
+            if selectedTaskIDs.isEmpty && candidate.duration <= overshootCap {
+                selectedTaskIDs.append(candidate.task.id)
+                coveredSeconds = nextCovered
+                break
+            }
+
+            continue
+        }
+
+        guard !selectedTaskIDs.isEmpty else { return nil }
+
+        return DayCapacityPullForwardSuggestion(
+            taskIDs: selectedTaskIDs,
+            taskCount: selectedTaskIDs.count,
+            pulledForwardSeconds: coveredSeconds
+        )
+    }
+
     func deferredDateToNextPlanningDay(from dueDate: Date?, nextPlanningWindow: PlanningDayWindow) -> Date {
         let baseline = nextPlanningWindow.start
         guard let dueDate else { return baseline }
@@ -282,6 +387,31 @@ struct DayCapacityService {
         ) ?? baseline
 
         if candidate >= nextPlanningWindow.start && candidate < nextPlanningWindow.end {
+            return candidate
+        }
+
+        return baseline
+    }
+
+    func pulledDateToCurrentPlanningDay(
+        from dueDate: Date?,
+        currentPlanningWindow: PlanningDayWindow,
+        now: Date
+    ) -> Date {
+        let baseline = max(now, currentPlanningWindow.start)
+        guard let dueDate else { return baseline }
+        guard hasSpecificTime(dueDate) else { return baseline }
+
+        let components = calendar.dateComponents([.hour, .minute, .second], from: dueDate)
+        let dayStart = calendar.startOfDay(for: currentPlanningWindow.labelDate)
+        let candidate = calendar.date(
+            bySettingHour: components.hour ?? 9,
+            minute: components.minute ?? 0,
+            second: components.second ?? 0,
+            of: dayStart
+        ) ?? baseline
+
+        if candidate >= baseline && candidate < currentPlanningWindow.end {
             return candidate
         }
 

@@ -9,14 +9,25 @@ import Foundation
 import NaturalLanguage
 
 struct SmartInputParser {
+
+    enum EntryType: String, Sendable {
+        case task
+        case event
+    }
     
     struct Result {
         let cleanTitle: String
         let project: Project?
         let duration: TimeInterval?
         let date: Date?
+        let dateHasExplicitTime: Bool
         let isRecurring: Bool
         let recurrenceInterval: String?
+        let entryType: EntryType
+
+        var isEvent: Bool {
+            entryType == .event
+        }
     }
 
     struct ComposerResult: Sendable {
@@ -24,7 +35,13 @@ struct SmartInputParser {
         let projectName: String?
         let duration: TimeInterval?
         let date: Date?
+        let dateHasExplicitTime: Bool
         let recurrenceInterval: String?
+        let entryType: EntryType
+
+        var isEvent: Bool {
+            entryType == .event
+        }
     }
 
     private struct CoreResult: Sendable {
@@ -32,7 +49,9 @@ struct SmartInputParser {
         let projectName: String?
         let duration: TimeInterval?
         let date: Date?
+        let dateHasExplicitTime: Bool
         let recurrenceInterval: String?
+        let entryType: EntryType
     }
 
     // Cache expensive resources used across parses.
@@ -47,6 +66,14 @@ struct SmartInputParser {
     private static let dayOfMonthRegex = try? NSRegularExpression(
         pattern: #"\b(\d+)(?:st|nd|rd|th)\b"#,
         options: .caseInsensitive
+    )
+    private static let eventMarkerRegex = try? NSRegularExpression(
+        pattern: #"(?i)(?:^\s*(?:event|evt|calendar|cal)\s*:?\s*)|(?:\s+(?:event|evt|calendar|cal)\s*:?\s*$)"#,
+        options: []
+    )
+    private static let explicitTimeRegex = try? NSRegularExpression(
+        pattern: #"(?i)\b(?:[01]?\d(?::[0-5]\d)?\s?[ap]m|[01]?\d:[0-5]\d|noon|midnight|tonight)\b"#,
+        options: []
     )
     
     /// Parses the raw input text to find a matching project and duration.
@@ -66,8 +93,10 @@ struct SmartInputParser {
             project: matchedProject,
             duration: core.duration,
             date: core.date,
+            dateHasExplicitTime: core.dateHasExplicitTime,
             isRecurring: core.recurrenceInterval != nil,
-            recurrenceInterval: core.recurrenceInterval
+            recurrenceInterval: core.recurrenceInterval,
+            entryType: core.entryType
         )
     }
 
@@ -78,7 +107,9 @@ struct SmartInputParser {
             projectName: core.projectName,
             duration: core.duration,
             date: core.date,
-            recurrenceInterval: core.recurrenceInterval
+            dateHasExplicitTime: core.dateHasExplicitTime,
+            recurrenceInterval: core.recurrenceInterval,
+            entryType: core.entryType
         )
     }
 
@@ -86,8 +117,26 @@ struct SmartInputParser {
         var remainingText = text
         var foundProjectName: String?
         var foundDuration: TimeInterval?
+        var foundEntryType: EntryType = .task
+        var foundDateHasExplicitTime = false
         
-        let lowerText = text.lowercased()
+        if let eventRegex = eventMarkerRegex {
+            let matches = eventRegex.matches(
+                in: remainingText,
+                range: NSRange(remainingText.startIndex..., in: remainingText)
+            )
+            if !matches.isEmpty {
+                foundEntryType = .event
+                for match in matches.reversed() {
+                    if let range = Range(match.range, in: remainingText) {
+                        remainingText.removeSubrange(range)
+                    }
+                }
+                remainingText = cleanWhitespace(remainingText)
+            }
+        }
+        
+        let lowerText = remainingText.lowercased()
         
         // 0. Prepare Candidates
         let sortedProjectNames = projectNames.sorted { $0.count > $1.count }
@@ -227,7 +276,8 @@ struct SmartInputParser {
         if let detector = dateDetector {
             // Fix: "due Friday" is often misparsed by NSDataDetector as "Today".
             // Fix: also strip "on", "the" to help clean up "due on the 12th"
-            let dateText = remainingText.replacingOccurrences(of: #"due\s+(?:on\s+)?(?:the\s+)?"#, with: "", options: [.regularExpression, .caseInsensitive])
+            let rawDateText = remainingText.replacingOccurrences(of: #"due\s+(?:on\s+)?(?:the\s+)?"#, with: "", options: [.regularExpression, .caseInsensitive])
+            let dateText = normalizeDateTypos(rawDateText)
             
             let matches = detector.matches(in: dateText, options: [], range: NSRange(dateText.startIndex..., in: dateText))
             
@@ -237,10 +287,12 @@ struct SmartInputParser {
                 // (Simplified for brevity in this chunk, but we need to remove the ORIGINAL text range if possible, or just the matched range in the clean text?
                 // Removing from 'remainingText' based on 'dateText' range is risky if indices shifted.
                 // Safest is to just remove the matched string from remainingText.)
-                if let range = Range(match.range, in: dateText) {
-                    let matchedString = String(dateText[range])
+                if let normalizedRange = Range(match.range, in: dateText) {
+                    let normalizedMatchedString = String(dateText[normalizedRange])
+                    let rawMatchedString = Range(match.range, in: rawDateText).map { String(rawDateText[$0]) } ?? normalizedMatchedString
+                    foundDateHasExplicitTime = hasExplicitTime(in: normalizedMatchedString)
                     // Attempt to remove this string from original
-                    remainingText = remainingText.replacingOccurrences(of: matchedString, with: "", options: .caseInsensitive)
+                    remainingText = remainingText.replacingOccurrences(of: rawMatchedString, with: "", options: .caseInsensitive)
                     // Also attempt to remove "due " prefix if it was adjacent? 
                     // Let's just do a rough clean of "due" keyword if date found.
                     remainingText = remainingText.replacingOccurrences(of: "due ", with: "", options: .caseInsensitive)
@@ -267,9 +319,10 @@ struct SmartInputParser {
                          }
                          if let date = calendar.date(from: components) {
                              foundDate = date
+                             foundDateHasExplicitTime = hasExplicitTime(in: dateText)
                              // Cleanup
-                             if let fullRange = Range(dayMatch.range, in: dateText) {
-                                 let matchedStr = String(dateText[fullRange])
+                             if let fullRange = Range(dayMatch.range, in: rawDateText) {
+                                 let matchedStr = String(rawDateText[fullRange])
                                  remainingText = remainingText.replacingOccurrences(of: matchedStr, with: "")
                                  remainingText = remainingText.replacingOccurrences(of: "due ", with: "", options: .caseInsensitive)
                                      .replacingOccurrences(of: "on the", with: "", options: .caseInsensitive) // Rough clean
@@ -303,12 +356,16 @@ struct SmartInputParser {
             }
         }
         
+        let normalizedDate = DueDateSupport.normalizeParsedDate(foundDate, hasExplicitTime: foundDateHasExplicitTime)
+
         return CoreResult(
             cleanTitle: remainingText,
             projectName: foundProjectName,
             duration: foundDuration,
-            date: foundDate,
-            recurrenceInterval: foundRecurrence
+            date: normalizedDate,
+            dateHasExplicitTime: foundDateHasExplicitTime,
+            recurrenceInterval: foundRecurrence,
+            entryType: foundEntryType
         )
     }
     
@@ -346,5 +403,24 @@ struct SmartInputParser {
         }
         
         return dist[a.count][b.count]
+    }
+
+    private static func cleanWhitespace(_ text: String) -> String {
+        text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func hasExplicitTime(in text: String) -> Bool {
+        guard let regex = explicitTimeRegex else { return false }
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.firstMatch(in: text, options: [], range: range) != nil
+    }
+
+    private static func normalizeDateTypos(_ text: String) -> String {
+        text.replacingOccurrences(
+            of: #"\bfeburary\b"#,
+            with: "february",
+            options: [.regularExpression, .caseInsensitive]
+        )
     }
 }

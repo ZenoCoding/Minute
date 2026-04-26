@@ -132,8 +132,8 @@ struct EditTaskSheet: View {
                     .popover(isPresented: $showDatePicker, arrowEdge: .bottom) {
                         VStack(spacing: 12) {
                             HStack {
-                                Button("Today") { dueDate = Date(); showDatePicker = false }
-                                Button("Tomorrow") { dueDate = Calendar.current.date(byAdding: .day, value: 1, to: Date()); showDatePicker = false }
+                                Button("Today") { dueDate = DueDateSupport.presetToday(); showDatePicker = false }
+                                Button("Tomorrow") { dueDate = DueDateSupport.presetTomorrow(); showDatePicker = false }
                                 Button("Clear") { dueDate = nil; showDatePicker = false }.foregroundStyle(.red)
                             }
                             .controlSize(.small)

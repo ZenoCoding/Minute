@@ -10,6 +10,7 @@ import SwiftData
 
 struct FullScreenCaptureView: View {
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject var calendarManager: CalendarManager
     @Binding var isPresented: Bool
     
     @Query(sort: \Project.createdAt)
@@ -25,6 +26,7 @@ struct FullScreenCaptureView: View {
     @State private var detectedDuration: TimeInterval?
     @State private var detectedDate: Date?
     @State private var detectedRecurrence: String?
+    @State private var detectedIsEvent = false
     
     // Manual overrides
     @State private var selectedProject: Project?
@@ -65,6 +67,10 @@ struct FullScreenCaptureView: View {
     
     var effectiveDate: Date? {
         selectedDate ?? detectedDate
+    }
+
+    var effectiveIsEvent: Bool {
+        detectedIsEvent
     }
 
     private static let fullDateFormatter: DateFormatter = {
@@ -122,7 +128,7 @@ struct FullScreenCaptureView: View {
                                 .font(.title2)
                                 .foregroundStyle(.secondary)
                             
-                            TextField("Add a task...", text: $text)
+                            TextField("Add a task or event...", text: $text)
                                 .textFieldStyle(.plain)
                                 .font(.title3)
                                 .focused($isInputFocused)
@@ -155,6 +161,7 @@ struct FullScreenCaptureView: View {
                                                 detectedDuration = result.duration
                                                 detectedDate = result.date
                                                 detectedRecurrence = result.recurrenceInterval
+                                                detectedIsEvent = result.isEvent
                                             }
                                         }
                                     }
@@ -207,7 +214,7 @@ struct FullScreenCaptureView: View {
                 Spacer()
                 
                 // Hint
-                Text("Type a task and press Enter • ESC to close")
+                Text("Type a task or `event ...` and press Enter • ESC to close")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .padding(.bottom, 30)
@@ -227,26 +234,38 @@ struct FullScreenCaptureView: View {
     
     var metadataBar: some View {
         HStack(spacing: 8) {
-            // Project
-            Button { showProjectPicker = true } label: {
+            if effectiveIsEvent {
                 HStack(spacing: 4) {
-                    if let icon = effectiveProject?.area?.iconName {
-                        Image(systemName: icon)
-                    } else {
-                        Image(systemName: "folder")
-                    }
-                    if let project = effectiveProject {
-                        Text(project.name)
-                    }
+                    Image(systemName: "calendar.badge.plus")
+                    Text("Event")
                 }
                 .font(.caption)
+                .foregroundStyle(.blue)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .background(Color.black.opacity(0.2), in: Capsule())
-            }
-            .buttonStyle(.plain)
-            .popover(isPresented: $showProjectPicker, arrowEdge: .bottom) {
-                projectPicker
+            } else {
+                // Project
+                Button { showProjectPicker = true } label: {
+                    HStack(spacing: 4) {
+                        if let icon = effectiveProject?.area?.iconName {
+                            Image(systemName: icon)
+                        } else {
+                            Image(systemName: "folder")
+                        }
+                        if let project = effectiveProject {
+                            Text(project.name)
+                        }
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.2), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showProjectPicker, arrowEdge: .bottom) {
+                    projectPicker
+                }
             }
             
             // Date
@@ -280,7 +299,7 @@ struct FullScreenCaptureView: View {
             }
             
             // Recurrence
-            if let recurrence = effectiveRecurrence {
+            if !effectiveIsEvent, let recurrence = effectiveRecurrence {
                 HStack(spacing: 4) {
                     Image(systemName: "repeat")
                     Text(recurrence.capitalized)
@@ -333,9 +352,9 @@ struct FullScreenCaptureView: View {
     var datePicker: some View {
         VStack(spacing: 12) {
             HStack {
-                Button("Today") { selectedDate = Date(); showDatePicker = false }
+                Button("Today") { selectedDate = DueDateSupport.presetToday(); showDatePicker = false }
                 Button("Tomorrow") { 
-                    selectedDate = Calendar.current.date(byAdding: .day, value: 1, to: Date())
+                    selectedDate = DueDateSupport.presetTomorrow()
                     showDatePicker = false 
                 }
             }
@@ -357,6 +376,24 @@ struct FullScreenCaptureView: View {
         
         let parsed = SmartInputParser.parse(text: trimmed, projects: activeProjects)
         let cleanTitle = parsed.cleanTitle.isEmpty ? trimmed : parsed.cleanTitle
+
+        if parsed.isEvent {
+            let createdEvent = calendarManager.createQuickEvent(
+                title: cleanTitle,
+                date: effectiveDate ?? parsed.date,
+                duration: effectiveDuration ?? parsed.duration,
+                hasExplicitTime: parsed.dateHasExplicitTime
+            )
+
+            if createdEvent {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    addedTasks.insert(AddedTask(title: cleanTitle, projectName: "Calendar"), at: 0)
+                }
+                resetComposer()
+                text = ""
+                return
+            }
+        }
         
         let task = TaskItem(
             title: cleanTitle,
@@ -384,6 +421,7 @@ struct FullScreenCaptureView: View {
         detectedDuration = nil
         detectedDate = nil
         detectedRecurrence = nil
+        detectedIsEvent = false
         selectedProject = nil
         selectedDate = nil
         selectedDuration = nil

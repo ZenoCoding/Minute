@@ -22,15 +22,35 @@ struct PulseDashboardView: View {
     let onNavigateToAreas: () -> Void
 
     private var hasCalendarAccess: Bool {
-        calendarManager.authorizationStatus == .fullAccess || calendarManager.authorizationStatus == .writeOnly
+        calendarManager.canReadEvents
     }
 
     private var scheduleHighlights: [CalendarHighlight] {
         calendarManager.highlights(for: now, now: now)
     }
 
+    private var tomorrowDate: Date {
+        Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: now)) ?? now
+    }
+
     private var todayEvents: [EKEvent] {
         calendarManager.todayEvents(for: now, now: now)
+    }
+
+    private var tomorrowEvents: [EKEvent] {
+        calendarManager.tomorrowEvents(from: now, now: now)
+    }
+
+    private var nextEvent: EKEvent? {
+        calendarManager.nextEvent(after: now)
+    }
+
+    private var todayBusySeconds: TimeInterval {
+        calendarManager.busySeconds(on: now, now: now)
+    }
+
+    private var tomorrowBusySeconds: TimeInterval {
+        calendarManager.busySeconds(on: tomorrowDate, now: now)
     }
     
     var body: some View {
@@ -53,17 +73,29 @@ struct PulseDashboardView: View {
 
                     if hasCalendarAccess {
                         ScheduleHighlightsCard(
+                            now: now,
                             highlights: scheduleHighlights,
                             todayEvents: todayEvents,
-                            onOpenCalendar: openCalendarApp
+                            tomorrowEvents: tomorrowEvents,
+                            nextEvent: nextEvent,
+                            todayBusySeconds: todayBusySeconds,
+                            tomorrowBusySeconds: tomorrowBusySeconds,
+                            onOpenCalendarDay: openCalendarApp
                         )
                     } else if calendarManager.authorizationStatus == .notDetermined {
                         Button("Connect Calendar") {
                             calendarManager.requestAccess()
                         }
                         .buttonStyle(.borderedProminent)
+                    } else if calendarManager.authorizationStatus == .writeOnly {
+                        Text("Calendar access is set to Add Only. Enable Full Access in System Settings to show schedule highlights.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
                     } else {
-                        Text("Calendar access is off. Enable it in System Settings to show highlights.")
+                        Text("Calendar access is off. Enable Full Access in System Settings to show highlights.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .padding(12)
@@ -123,14 +155,14 @@ struct PulseDashboardView: View {
             now = date
         }
         .onChange(of: calendarManager.authorizationStatus) { _, status in
-            if status == .fullAccess || status == .writeOnly {
+            if status == .fullAccess {
                 calendarManager.fetchEvents()
             }
         }
     }
 
-    private func openCalendarApp() {
-        guard let url = URL(string: "calshow:\(now.timeIntervalSinceReferenceDate)") else { return }
+    private func openCalendarApp(for date: Date) {
+        guard let url = URL(string: "calshow:\(date.timeIntervalSinceReferenceDate)") else { return }
         NSWorkspace.shared.open(url)
     }
 }
