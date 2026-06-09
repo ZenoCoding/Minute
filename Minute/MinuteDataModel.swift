@@ -19,6 +19,7 @@ enum ProjectStatus: String, Codable {
 
 @Model class Area {
     var id: UUID = UUID()
+    var sourceRequestID: String?
     var name: String
     var themeColor: String // Hex string
     var iconName: String   // SF Symbol
@@ -39,6 +40,7 @@ enum ProjectStatus: String, Codable {
 
 @Model class Project {
     var id: UUID = UUID()
+    var sourceRequestID: String?
     var name: String
     var status: ProjectStatus
     var weeklyGoalSeconds: TimeInterval?
@@ -63,6 +65,7 @@ enum ProjectStatus: String, Codable {
 
 @Model class TaskItem {
     var id: UUID = UUID()
+    var sourceRequestID: String?
     var title: String
     var isCompleted: Bool
     var completedAt: Date?

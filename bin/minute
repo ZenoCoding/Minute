@@ -1,0 +1,476 @@
+#!/usr/bin/env python3
+
+import argparse
+import datetime as dt
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import time
+import uuid
+
+
+BUNDLE_ID = "com.tychoyoung.Minute"
+COMMAND_ROOT = (
+    pathlib.Path.home()
+    / "Library"
+    / "Containers"
+    / BUNDLE_ID
+    / "Data"
+    / "Library"
+    / "Application Support"
+    / "Minute"
+    / "Commands"
+)
+INBOX = COMMAND_ROOT / "inbox"
+RECEIPTS = COMMAND_ROOT / "receipts"
+
+
+def duration_seconds(value):
+    if value is None:
+        return None
+
+    text = value.strip().lower()
+    if text.replace(".", "", 1).isdigit():
+        return float(text) * 60
+
+    total = 0.0
+    number = ""
+    matched = False
+    for char in text.replace(" ", ""):
+        if char.isdigit() or char == ".":
+            number += char
+            continue
+        if char in ("h", "m") and number:
+            amount = float(number)
+            total += amount * (3600 if char == "h" else 60)
+            number = ""
+            matched = True
+            continue
+        raise argparse.ArgumentTypeError(
+            f"invalid duration '{value}'; use 45m, 1h30m, or minutes"
+        )
+
+    if number or not matched:
+        raise argparse.ArgumentTypeError(
+            f"invalid duration '{value}'; use 45m, 1h30m, or minutes"
+        )
+    return total
+
+
+def iso_date(value):
+    if value is None:
+        return None
+
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = dt.datetime.fromisoformat(normalized)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            f"invalid date '{value}'; use ISO-8601, for example 2026-06-08T17:00:00-07:00"
+        ) from error
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.datetime.now().astimezone().tzinfo)
+    return parsed.isoformat(timespec="seconds")
+
+
+def add_delivery_options(parser):
+    parser.add_argument("--json", action="store_true", help="Print the JSON receipt.")
+    parser.add_argument(
+        "--request-id",
+        help="Stable idempotency key. A UUID is generated when omitted.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Seconds to wait for Minute to process the request.",
+    )
+    parser.add_argument(
+        "--no-launch",
+        action="store_true",
+        help="Do not launch Minute after enqueueing the request.",
+    )
+
+
+def add_entity_selector(parser):
+    parser.add_argument(
+        "entity",
+        choices=("area", "areas", "project", "projects", "task", "tasks"),
+    )
+
+
+def singular_entity(value):
+    return value[:-1] if value.endswith("s") else value
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="minute",
+        description="View and modify Minute data without UI automation.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    ping = subparsers.add_parser("ping", help="Check that Minute's command API is running.")
+    add_delivery_options(ping)
+
+    area = subparsers.add_parser("area", help="Create an area.")
+    area.add_argument("name")
+    area.add_argument("--color", default="007AFF", help="Six-digit hex color.")
+    area.add_argument("--icon", default="folder", help="SF Symbol name.")
+    area.add_argument("--order", type=int)
+    add_delivery_options(area)
+
+    project = subparsers.add_parser("project", help="Create a project.")
+    project.add_argument("name")
+    project.add_argument("--area", help="Existing area name. Defaults to Unsorted.")
+    project.add_argument(
+        "--status",
+        choices=("active", "backlog", "completed", "archived"),
+        default="active",
+    )
+    project.add_argument(
+        "--weekly-goal",
+        type=duration_seconds,
+        metavar="DURATION",
+        help="Weekly goal, such as 5h or 90m.",
+    )
+    project.add_argument("--order", type=int)
+    add_delivery_options(project)
+
+    task = subparsers.add_parser("task", help="Create a task.")
+    task.add_argument("text", help="Task text. Natural-language parsing is enabled by default.")
+    task.add_argument("--project", help="Exact existing project name.")
+    task.add_argument("--due", type=iso_date, metavar="ISO_DATE")
+    task.add_argument(
+        "--duration",
+        type=duration_seconds,
+        metavar="DURATION",
+        help="Estimated duration, such as 45m or 1h30m.",
+    )
+    task.add_argument("--recurrence", choices=("daily", "weekly"))
+    task.add_argument("--order", type=int)
+    task.add_argument(
+        "--no-parse",
+        action="store_true",
+        help="Treat the task text literally instead of parsing dates, durations, or projects.",
+    )
+    add_delivery_options(task)
+
+    list_command = subparsers.add_parser("list", help="List current Minute data.")
+    add_entity_selector(list_command)
+    list_command.add_argument("--area", help="Filter projects by area.")
+    list_command.add_argument("--project", help="Filter tasks by project.")
+    list_command.add_argument(
+        "--status",
+        choices=("active", "backlog", "completed", "archived"),
+        help="Filter projects by status.",
+    )
+    completion_filter = list_command.add_mutually_exclusive_group()
+    completion_filter.add_argument("--completed", action="store_true")
+    completion_filter.add_argument("--incomplete", action="store_true")
+    list_command.add_argument("--limit", type=int, default=200)
+    add_delivery_options(list_command)
+
+    get_command = subparsers.add_parser("get", help="View one entity by UUID or exact name.")
+    add_entity_selector(get_command)
+    get_command.add_argument("identifier")
+    add_delivery_options(get_command)
+
+    update = subparsers.add_parser("update", help="Update one entity by UUID or exact name.")
+    add_entity_selector(update)
+    update.add_argument("identifier")
+    update.add_argument("--name", help="New area or project name.")
+    update.add_argument("--title", help="New task title.")
+    update.add_argument("--area", help="Move a project to an existing area.")
+    update.add_argument("--project", help="Move a task to an existing project.")
+    update.add_argument(
+        "--status",
+        choices=("active", "backlog", "completed", "archived"),
+    )
+    update.add_argument("--weekly-goal", type=duration_seconds, metavar="DURATION")
+    update.add_argument("--clear-weekly-goal", action="store_true")
+    update.add_argument("--color", help="New area hex color.")
+    update.add_argument("--icon", help="New area SF Symbol.")
+    update.add_argument("--due", type=iso_date, metavar="ISO_DATE")
+    update.add_argument("--clear-due", action="store_true")
+    update.add_argument("--duration", type=duration_seconds, metavar="DURATION")
+    update.add_argument("--clear-duration", action="store_true")
+    update.add_argument("--recurrence", choices=("daily", "weekly"))
+    update.add_argument("--clear-recurrence", action="store_true")
+    completion_update = update.add_mutually_exclusive_group()
+    completion_update.add_argument("--completed", action="store_true")
+    completion_update.add_argument("--incomplete", action="store_true")
+    update.add_argument("--order", type=int)
+    add_delivery_options(update)
+
+    delete = subparsers.add_parser("delete", help="Delete one entity by UUID or exact name.")
+    add_entity_selector(delete)
+    delete.add_argument("identifier")
+    delete.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Also delete child projects/tasks when deleting an area or project.",
+    )
+    delete.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm the destructive operation.",
+    )
+    add_delivery_options(delete)
+
+    request = subparsers.add_parser(
+        "request",
+        help="Send a complete version-1 request from a JSON file or stdin.",
+    )
+    request.add_argument("file", nargs="?", default="-")
+    add_delivery_options(request)
+
+    return parser
+
+
+def make_request(args):
+    request_id = args.request_id or str(uuid.uuid4())
+
+    if args.command == "request":
+        if args.file == "-":
+            request = json.load(sys.stdin)
+        else:
+            with open(args.file, encoding="utf-8") as handle:
+                request = json.load(handle)
+        request.setdefault("version", 1)
+        request.setdefault("requestID", request_id)
+        return request
+
+    if args.command == "ping":
+        return {
+            "version": 1,
+            "requestID": request_id,
+            "action": "ping",
+        }
+
+    if args.command in ("list", "get", "update", "delete"):
+        entity = singular_entity(args.entity)
+        payload = {}
+
+        if args.command == "list":
+            payload["limit"] = args.limit
+            if args.area:
+                payload["area"] = args.area
+            if args.project:
+                payload["project"] = args.project
+            if args.status:
+                payload["status"] = args.status
+            if args.completed:
+                payload["completed"] = True
+            elif args.incomplete:
+                payload["completed"] = False
+        else:
+            payload["identifier"] = args.identifier
+
+        if args.command == "update":
+            if args.name:
+                payload["name"] = args.name
+            if args.title:
+                payload["text"] = args.title
+            if args.area:
+                payload["area"] = args.area
+            if args.project:
+                payload["project"] = args.project
+            if args.status:
+                payload["status"] = args.status
+            if args.weekly_goal is not None:
+                payload["weeklyGoalSeconds"] = args.weekly_goal
+            if args.clear_weekly_goal:
+                payload["clearWeeklyGoal"] = True
+            if args.color:
+                payload["themeColor"] = args.color
+            if args.icon:
+                payload["iconName"] = args.icon
+            if args.due:
+                payload["dueDate"] = args.due
+            if args.clear_due:
+                payload["clearDueDate"] = True
+            if args.duration is not None:
+                payload["durationSeconds"] = args.duration
+            if args.clear_duration:
+                payload["clearDuration"] = True
+            if args.recurrence:
+                payload["recurrence"] = args.recurrence
+            if args.clear_recurrence:
+                payload["clearRecurrence"] = True
+            if args.completed:
+                payload["completed"] = True
+            elif args.incomplete:
+                payload["completed"] = False
+            if args.order is not None:
+                payload["orderIndex"] = args.order
+
+        if args.command == "delete":
+            if not args.yes:
+                raise ValueError("delete requires --yes")
+            payload["recursive"] = args.recursive
+
+        return {
+            "version": 1,
+            "requestID": request_id,
+            "action": args.command,
+            "entity": entity,
+            "payload": payload,
+        }
+
+    payload = {}
+    if args.command == "area":
+        payload = {
+            "name": args.name,
+            "themeColor": args.color,
+            "iconName": args.icon,
+        }
+        if args.order is not None:
+            payload["orderIndex"] = args.order
+    elif args.command == "project":
+        payload = {
+            "name": args.name,
+            "status": args.status,
+        }
+        if args.area:
+            payload["area"] = args.area
+        if args.weekly_goal is not None:
+            payload["weeklyGoalSeconds"] = args.weekly_goal
+        if args.order is not None:
+            payload["orderIndex"] = args.order
+    elif args.command == "task":
+        payload = {
+            "text": args.text,
+            "parseNaturalLanguage": not args.no_parse,
+        }
+        if args.project:
+            payload["project"] = args.project
+        if args.due:
+            payload["dueDate"] = args.due
+        if args.duration is not None:
+            payload["durationSeconds"] = args.duration
+        if args.recurrence:
+            payload["recurrence"] = args.recurrence
+        if args.order is not None:
+            payload["orderIndex"] = args.order
+
+    return {
+        "version": 1,
+        "requestID": request_id,
+        "action": "create",
+        "entity": args.command,
+        "payload": payload,
+    }
+
+
+def launch_minute():
+    candidates = [
+        os.environ.get("MINUTE_APP_PATH"),
+        str(pathlib.Path.home() / "Applications" / "Minute.app"),
+        "/Applications/Minute.app",
+    ]
+    for candidate in candidates:
+        if candidate and pathlib.Path(candidate).exists():
+            fallback = subprocess.run(
+                ["/usr/bin/open", candidate],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if fallback.returncode == 0:
+                return
+
+    result = subprocess.run(
+        ["/usr/bin/open", "-b", BUNDLE_ID],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return
+
+    message = result.stderr.strip() or "Minute.app could not be launched."
+    raise RuntimeError(message)
+
+
+def enqueue(request):
+    INBOX.mkdir(parents=True, exist_ok=True)
+    RECEIPTS.mkdir(parents=True, exist_ok=True)
+
+    request_id = request["requestID"]
+    destination = INBOX / f"{request_id}.json"
+    temporary = INBOX / f".{request_id}.{os.getpid()}.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(request, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.replace(temporary, destination)
+    return RECEIPTS / f"{request_id}.json"
+
+
+def wait_for_receipt(path, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() <= deadline:
+        if path.exists():
+            with open(path, encoding="utf-8") as handle:
+                return json.load(handle)
+        time.sleep(0.1)
+    raise TimeoutError(
+        f"Minute did not process the request within {timeout:g}s. "
+        f"The queued request remains at {INBOX}."
+    )
+
+
+def print_receipt(receipt, as_json):
+    if as_json:
+        print(json.dumps(receipt, indent=2, sort_keys=True))
+        return
+
+    stream = sys.stdout if receipt.get("status") == "success" else sys.stderr
+    print(receipt.get("message", receipt.get("status", "unknown")), file=stream)
+    items = receipt.get("items") or []
+    for item in items:
+        entity = item.get("entity")
+        identifier = item.get("id", "")
+        name = item.get("name", "")
+        if entity == "area":
+            detail = f"{item.get('projectCount', 0)} projects"
+        elif entity == "project":
+            detail = f"{item.get('status', '')}, {item.get('area') or 'no area'}"
+        else:
+            marker = "done" if item.get("isCompleted") else "open"
+            detail = f"{marker}, {item.get('project') or 'Inbox'}"
+        print(f"{identifier}\t{name}\t{detail}", file=stream)
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    try:
+        request = make_request(args)
+        request_id = request.get("requestID")
+        if not isinstance(request_id, str) or not request_id:
+            raise ValueError("requestID must be a non-empty string")
+
+        receipt_path = RECEIPTS / f"{request_id}.json"
+        if receipt_path.exists():
+            with open(receipt_path, encoding="utf-8") as handle:
+                receipt = json.load(handle)
+        else:
+            receipt_path = enqueue(request)
+            if not args.no_launch:
+                launch_minute()
+            receipt = wait_for_receipt(receipt_path, args.timeout)
+
+        print_receipt(receipt, args.json)
+        return 0 if receipt.get("status") == "success" else 1
+    except (OSError, RuntimeError, TimeoutError, ValueError, json.JSONDecodeError) as error:
+        print(f"minute: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

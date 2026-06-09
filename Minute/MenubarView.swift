@@ -4,6 +4,7 @@ import SwiftData
 
 struct MenubarView: View {
     @EnvironmentObject var calendarManager: CalendarManager
+    @Environment(\.modelContext) private var modelContext
     
     // Query for active tasks
     @Query(filter: #Predicate<TaskItem> { !$0.isCompleted }, sort: \TaskItem.orderIndex)
@@ -105,8 +106,29 @@ struct MenubarView: View {
                                     .foregroundStyle(.primary)
                                     .lineLimit(1)
                                 Spacer()
+
+                                Menu {
+                                    Button("Delete Task", role: .destructive) {
+                                        deleteTask(task)
+                                    }
+                                } label: {
+                                    Image(systemName: "ellipsis")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 20, height: 20)
+                                        .contentShape(Rectangle())
+                                }
+                                .menuStyle(.borderlessButton)
+                                .menuIndicator(.hidden)
+                                .fixedSize()
                             }
                             .padding(.horizontal, 16)
+                            .contentShape(Rectangle())
+                            .contextMenu {
+                                Button("Delete Task", role: .destructive) {
+                                    deleteTask(task)
+                                }
+                            }
                         }
                     }
                     
@@ -141,6 +163,18 @@ struct MenubarView: View {
             .background(Color(NSColor.controlBackgroundColor))
         }
         .frame(width: 280) // Slightly wider for comfort
+    }
+
+    private func deleteTask(_ task: TaskItem) {
+        withAnimation {
+            modelContext.delete(task)
+        }
+
+        do {
+            try modelContext.save()
+        } catch {
+            print("Failed to delete task: \(error)")
+        }
     }
 }
 

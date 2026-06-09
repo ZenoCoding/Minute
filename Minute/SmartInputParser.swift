@@ -44,6 +44,16 @@ struct SmartInputParser {
         }
     }
 
+    struct ProjectCandidate: Sendable {
+        let name: String
+        let hints: [String]
+
+        init(name: String, hints: [String] = []) {
+            self.name = name
+            self.hints = hints
+        }
+    }
+
     private struct CoreResult: Sendable {
         let cleanTitle: String
         let projectName: String?
@@ -72,9 +82,13 @@ struct SmartInputParser {
         options: []
     )
     private static let explicitTimeRegex = try? NSRegularExpression(
-        pattern: #"(?i)\b(?:[01]?\d(?::[0-5]\d)?\s?[ap]m|[01]?\d:[0-5]\d|noon|midnight|tonight)\b"#,
+        pattern: #"(?i)\b(?:(?:1[0-2]|[1-9])(?::[0-5]\d)?\s?[ap]m|(?:[01]?\d|2[0-3]):[0-5]\d|noon|midnight|tonight)\b"#,
         options: []
     )
+    private static let projectStopWords: Set<String> = [
+        "and", "the", "for", "with", "from", "into", "this", "that",
+        "task", "work", "finish", "start", "make", "update", "review"
+    ]
     
     /// Parses the raw input text to find a matching project and duration.
     /// - Parameters:
@@ -82,8 +96,8 @@ struct SmartInputParser {
     ///   - projects: List of candidate projects.
     /// - Returns: A Result containing the inferred project, duration, and the "clean" title (optional).
     static func parse(text: String, projects: [Project]) -> Result {
-        let projectNames = projects.map(\.name)
-        let core = parseCore(text: text, projectNames: projectNames)
+        let candidates = projects.map { ProjectCandidate(name: $0.name) }
+        let core = parseCore(text: text, projectCandidates: candidates)
         let matchedProject = core.projectName.flatMap { name in
             projects.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
         }
@@ -101,7 +115,12 @@ struct SmartInputParser {
     }
 
     static func parseForComposer(text: String, projectNames: [String]) -> ComposerResult {
-        let core = parseCore(text: text, projectNames: projectNames)
+        let candidates = projectNames.map { ProjectCandidate(name: $0) }
+        return parseForComposer(text: text, projectCandidates: candidates)
+    }
+
+    static func parseForComposer(text: String, projectCandidates: [ProjectCandidate]) -> ComposerResult {
+        let core = parseCore(text: text, projectCandidates: projectCandidates)
         return ComposerResult(
             cleanTitle: core.cleanTitle,
             projectName: core.projectName,
@@ -113,7 +132,7 @@ struct SmartInputParser {
         )
     }
 
-    private static func parseCore(text: String, projectNames: [String]) -> CoreResult {
+    private static func parseCore(text: String, projectCandidates: [ProjectCandidate]) -> CoreResult {
         var remainingText = text
         var foundProjectName: String?
         var foundDuration: TimeInterval?
@@ -139,58 +158,66 @@ struct SmartInputParser {
         let lowerText = remainingText.lowercased()
         
         // 0. Prepare Candidates
-        let sortedProjectNames = projectNames.sorted { $0.count > $1.count }
+        let sortedCandidates = projectCandidates.sorted { $0.name.count > $1.name.count }
         
         // 1. Exact Substring Match (Highest Confidence)
         // "Update Marketing stats" -> Matches "Marketing"
         if foundProjectName == nil {
-            for projectName in sortedProjectNames {
-                let pName = projectName.lowercased()
-                if lowerText.contains(pName) {
-                    foundProjectName = projectName
+            for candidate in sortedCandidates {
+                if containsTokenSequence(candidate.name, in: lowerText) {
+                    foundProjectName = candidate.name
                     break
                 }
             }
         }
         
-        // 2. Token Intersection Match (Medium Confidence)
-        // "Minute bug" -> Matches "Minute App" (intersection: "minute")
+        // 2. Weighted token match against the project name, area, and recent task titles.
         if foundProjectName == nil {
-            let inputTokens = Set(lowerText.components(separatedBy: .whitespacesAndNewlines).filter { $0.count > 2 })
-            
-            // Find project with highest token overlap
-            var bestMatch: String?
-            var maxOverlap = 0
-            
-            for projectName in sortedProjectNames {
-                let pTokens = Set(projectName.lowercased().components(separatedBy: .whitespacesAndNewlines).filter { $0.count > 2 })
-                let overlap = inputTokens.intersection(pTokens).count
-                
-                if overlap > maxOverlap {
-                    maxOverlap = overlap
-                    bestMatch = projectName
+            let inputTokens = projectTokens(in: lowerText)
+            let hintTokenFrequency = sortedCandidates.reduce(into: [String: Int]()) { frequencies, candidate in
+                for token in projectTokens(in: candidate.hints.joined(separator: " ")) {
+                    frequencies[token, default: 0] += 1
                 }
             }
-            
-            if maxOverlap > 0 {
-                foundProjectName = bestMatch
+            var bestMatch: (name: String, score: Int)?
+            var hasAmbiguousBestMatch = false
+
+            for candidate in sortedCandidates {
+                let nameTokens = projectTokens(in: candidate.name)
+                let hintTokens = projectTokens(in: candidate.hints.joined(separator: " "))
+                let nameOverlap = inputTokens.intersection(nameTokens).count
+                let overlappingHints = inputTokens.intersection(hintTokens)
+                let uniqueHintOverlap = overlappingHints.filter { hintTokenFrequency[$0] == 1 }.count
+                let score = (nameOverlap * 4) + overlappingHints.count + (uniqueHintOverlap * 2)
+                let isStrongEnough = nameOverlap > 0 || uniqueHintOverlap > 0 || overlappingHints.count >= 2
+
+                if isStrongEnough, score > (bestMatch?.score ?? 0) {
+                    bestMatch = (candidate.name, score)
+                    hasAmbiguousBestMatch = false
+                } else if isStrongEnough, score == bestMatch?.score {
+                    hasAmbiguousBestMatch = true
+                }
+            }
+
+            if !hasAmbiguousBestMatch {
+                foundProjectName = bestMatch?.name
             }
         }
         
         // 2.5. Prefix/Abbreviation Match (Medium-Low Confidence)
         // "Chem" -> Matches "Chemistry"
         if foundProjectName == nil {
-            let inputTokens = lowerText.components(separatedBy: .whitespacesAndNewlines).filter { $0.count >= 2 } // Allow 2 chars like "CS"
+            let inputTokens = projectTokens(in: lowerText).filter { $0.count >= 3 }
             
-            for projectName in sortedProjectNames {
-                let pTokens = projectName.lowercased().components(separatedBy: .whitespacesAndNewlines)
+            for candidate in sortedCandidates {
+                let pTokens = projectTokens(in: candidate.name)
                 
                 // Check if ANY input token is a prefix of ANY project token
                 // e.g. input "chem", project "chemistry" -> match
                 for iToken in inputTokens {
                     for pToken in pTokens {
                         if pToken.hasPrefix(iToken) {
-                            foundProjectName = projectName
+                            foundProjectName = candidate.name
                             break
                         }
                     }
@@ -210,12 +237,12 @@ struct SmartInputParser {
             let words = lowerText.components(separatedBy: .whitespacesAndNewlines).filter { $0.count > 3 }
             
             for word in words {
-                for projectName in sortedProjectNames {
+                for candidate in sortedCandidates {
                     // Check Levenshtein distance first (Typos)
                     // "Mrketing" -> "Marketing"
-                    let pName = projectName.lowercased()
+                    let pName = candidate.name.lowercased()
                     if levenshtein(a: word, b: pName) <= 2 && pName.count > 4 {
-                        foundProjectName = projectName
+                        foundProjectName = candidate.name
                         break
                     }
                     
@@ -223,9 +250,9 @@ struct SmartInputParser {
                     let pWords = pName.components(separatedBy: .whitespacesAndNewlines)
                     for pWord in pWords {
                         let distance = embedding.distance(between: word, and: pWord)
-                        if distance < 0.8 && distance < bestDistance {
+                        if distance < 0.55 && distance < bestDistance {
                             bestDistance = distance
-                            bestSemanticMatch = projectName
+                            bestSemanticMatch = candidate.name
                         }
                     }
                 }
@@ -245,27 +272,36 @@ struct SmartInputParser {
                 in: remainingText,
                 range: NSRange(remainingText.startIndex..., in: remainingText)
             )
-            
-            if let match = matches.last {
+
+            var totalDuration: TimeInterval = 0
+
+            for match in matches {
                 if let valRange = Range(match.range(at: 1), in: remainingText),
                    let unitRange = Range(match.range(at: 2), in: remainingText) {
-                    
+
                     let valString = String(remainingText[valRange])
                     let unitString = String(remainingText[unitRange]).lowercased()
-                    
+
                     if let value = Double(valString) {
                         if unitString.starts(with: "h") {
-                            foundDuration = value * 3600
+                            totalDuration += value * 3600
                         } else if unitString.starts(with: "m") {
-                            foundDuration = value * 60
+                            totalDuration += value * 60
                         }
                     }
-                    
+                }
+            }
+
+            if totalDuration > 0 {
+                foundDuration = totalDuration
+
+                for match in matches.reversed() {
                     if let fullRange = Range(match.range(at: 0), in: remainingText) {
                         remainingText.removeSubrange(fullRange)
-                        remainingText = remainingText.replacingOccurrences(of: "  ", with: " ").trimmingCharacters(in: .whitespaces)
                     }
                 }
+
+                remainingText = cleanWhitespace(remainingText)
             }
         }
         
@@ -408,6 +444,33 @@ struct SmartInputParser {
     private static func cleanWhitespace(_ text: String) -> String {
         text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func projectTokens(in text: String) -> Set<String> {
+        Set(normalizedWords(in: text).filter { token in
+            token.count >= 2 && !projectStopWords.contains(token)
+        })
+    }
+
+    private static func containsTokenSequence(_ phrase: String, in text: String) -> Bool {
+        let phraseWords = normalizedWords(in: phrase)
+        let textWords = normalizedWords(in: text)
+        guard !phraseWords.isEmpty, phraseWords.count <= textWords.count else { return false }
+
+        for startIndex in 0...(textWords.count - phraseWords.count) {
+            let endIndex = startIndex + phraseWords.count
+            if Array(textWords[startIndex..<endIndex]) == phraseWords {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private static func normalizedWords(in text: String) -> [String] {
+        text.lowercased()
+            .components(separatedBy: .alphanumerics.inverted)
+            .filter { !$0.isEmpty }
     }
 
     private static func hasExplicitTime(in text: String) -> Bool {

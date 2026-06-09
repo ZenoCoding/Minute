@@ -123,6 +123,7 @@ struct TaskStreamView: View {
             // Header / Smart Input Area
             InlineTaskComposer(
                 activeProjects: activeProjects,
+                taskHistory: allTasks,
                 capacitySummaryForDate: capacitySummaryForDate
             )
                 .padding(.horizontal)
@@ -692,6 +693,7 @@ struct TaskStreamView: View {
 
 struct InlineTaskComposer: View {
     let activeProjects: [Project]
+    let taskHistory: [TaskItem]
     let capacitySummaryForDate: (Date) -> (text: String, isOverloaded: Bool)?
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject var calendarManager: CalendarManager
@@ -705,6 +707,7 @@ struct InlineTaskComposer: View {
     @State private var showProjectPicker = false
     @State private var showDurationPicker = false
     @State private var customDurationText: String = ""
+    @State private var newProjectName: String = ""
     
     // Recurrence State
     @State private var detectedRecurrence: String?
@@ -719,7 +722,7 @@ struct InlineTaskComposer: View {
     
     // Effective Values
     var effectiveProject: Project? {
-        selectedProject ?? detectedProject ?? activeProjects.first
+        selectedProject ?? detectedProject
     }
     
     var effectiveDuration: TimeInterval? {
@@ -736,6 +739,18 @@ struct InlineTaskComposer: View {
 
     var effectiveIsEvent: Bool {
         detectedIsEvent
+    }
+
+    private var projectCandidates: [SmartInputParser.ProjectCandidate] {
+        activeProjects.map { project in
+            let recentTitles = taskHistory
+                .filter { $0.project?.id == project.id }
+                .sorted { $0.createdAt > $1.createdAt }
+                .prefix(12)
+                .map(\.title)
+            let hints = [project.area?.name].compactMap { $0 } + recentTitles
+            return SmartInputParser.ProjectCandidate(name: project.name, hints: hints)
+        }
     }
 
     private static let shortDateFormatter: DateFormatter = {
@@ -764,24 +779,29 @@ struct InlineTaskComposer: View {
                             resetComposer(keepText: true)
                         } else {
                             let inputSnapshot = newValue
-                            let projectNames = activeProjects.map(\.name)
+                            let candidateSnapshot = projectCandidates
                             parseTask = Task {
                                 try? await Task.sleep(for: .milliseconds(120))
                                 guard !Task.isCancelled else { return }
 
-                                let result = SmartInputParser.parseForComposer(text: inputSnapshot, projectNames: projectNames)
+                                let result = SmartInputParser.parseForComposer(
+                                    text: inputSnapshot,
+                                    projectCandidates: candidateSnapshot
+                                )
                                 guard !Task.isCancelled else { return }
 
-                                guard text == inputSnapshot else { return }
-                                detectedProject = result.projectName.flatMap { matchedName in
-                                    activeProjects.first {
-                                        $0.name.caseInsensitiveCompare(matchedName) == .orderedSame
+                                await MainActor.run {
+                                    guard text == inputSnapshot else { return }
+                                    detectedProject = result.projectName.flatMap { matchedName in
+                                        activeProjects.first {
+                                            $0.name.caseInsensitiveCompare(matchedName) == .orderedSame
+                                        }
                                     }
+                                    detectedDuration = result.duration
+                                    detectedDate = result.date
+                                    detectedRecurrence = result.recurrenceInterval
+                                    detectedIsEvent = result.isEvent
                                 }
-                                detectedDuration = result.duration
-                                detectedDate = result.date
-                                detectedRecurrence = result.recurrenceInterval
-                                detectedIsEvent = result.isEvent
                             }
                         }
                     }
@@ -816,14 +836,22 @@ struct InlineTaskComposer: View {
                                         if let icon = project.area?.iconName {
                                             Image(systemName: icon)
                                                 .font(.subheadline)
+                                        } else {
+                                            Image(systemName: "folder")
+                                                .font(.caption)
                                         }
                                         Text(project.name)
                                             .font(.caption)
                                             .fontWeight(.medium)
                                             .lineLimit(1)
                                     } else {
-                                        Text("Select Project")
+                                        Image(systemName: "tray")
                                             .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        Text("Inbox")
+                                            .font(.caption)
+                                            .fontWeight(.medium)
+                                            .foregroundStyle(.secondary)
                                             .lineLimit(1)
                                     }
                                 }
@@ -831,35 +859,54 @@ struct InlineTaskComposer: View {
                         }
                         .buttonStyle(.plain)
                         .popover(isPresented: $showProjectPicker, arrowEdge: .bottom) {
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    ForEach(activeProjects) { project in
-                                        Button {
-                                            selectedProject = project
-                                            showProjectPicker = false
-                                        } label: {
-                                            HStack {
-                                                if let icon = project.area?.iconName {
-                                                    Image(systemName: icon)
-                                                        .foregroundStyle(Color(hex: project.area?.themeColor ?? "") ?? .secondary)
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 6) {
+                                    TextField("New project", text: $newProjectName)
+                                        .textFieldStyle(.plain)
+                                        .onSubmit(createProjectFromPicker)
+
+                                    Button(action: createProjectFromPicker) {
+                                        Image(systemName: "plus.circle.fill")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(newProjectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                }
+                                .padding(8)
+                                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+
+                                Divider()
+
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        ForEach(activeProjects) { project in
+                                            Button {
+                                                selectedProject = project
+                                                showProjectPicker = false
+                                            } label: {
+                                                HStack {
+                                                    if let icon = project.area?.iconName {
+                                                        Image(systemName: icon)
+                                                            .foregroundStyle(Color(hex: project.area?.themeColor ?? "") ?? .secondary)
+                                                    }
+                                                    Text(project.name)
+                                                    Spacer()
+                                                    if effectiveProject?.id == project.id {
+                                                        Image(systemName: "checkmark")
+                                                            .font(.caption)
+                                                    }
                                                 }
-                                                Text(project.name)
-                                                Spacer()
-                                                if effectiveProject?.id == project.id {
-                                                    Image(systemName: "checkmark")
-                                                        .font(.caption)
-                                                }
+                                                .padding(.vertical, 6)
+                                                .padding(.horizontal, 8)
+                                                .contentShape(Rectangle())
                                             }
-                                            .padding(.vertical, 6)
-                                            .padding(.horizontal, 8)
-                                            .contentShape(Rectangle())
+                                            .buttonStyle(.plain)
                                         }
-                                        .buttonStyle(.plain)
                                     }
                                 }
-                                .padding()
+                                .frame(maxHeight: .infinity)
                             }
-                            .frame(width: 200, height: 200)
+                            .padding()
+                            .frame(width: 230, height: 250)
                         }
                     }
                     
@@ -1082,11 +1129,35 @@ struct InlineTaskComposer: View {
         }
     }
     
+    private func createProjectFromPicker() {
+        let name = newProjectName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+
+        do {
+            let service = MinuteDataService(modelContext: modelContext)
+            if let existingProject = try service.findProject(named: name) {
+                selectedProject = existingProject
+            } else {
+                selectedProject = try service.createProject(name: name)
+                try service.save()
+            }
+        } catch {
+            print("Failed to create project: \(error)")
+            return
+        }
+
+        newProjectName = ""
+        showProjectPicker = false
+    }
+
     private func createTask() {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        let result = SmartInputParser.parse(text: trimmed, projects: activeProjects)
+        let result = SmartInputParser.parseForComposer(
+            text: trimmed,
+            projectCandidates: projectCandidates
+        )
         let finalTitle = result.cleanTitle.isEmpty ? trimmed : result.cleanTitle
 
         if result.isEvent {
@@ -1100,23 +1171,29 @@ struct InlineTaskComposer: View {
                 resetComposer()
                 return
             }
+
+            return
         }
 
-        guard let project = effectiveProject else { return }
-        
-        let task = TaskItem(
-            title: finalTitle,
-            project: project,
-            estimatedDuration: effectiveDuration,
-            dueDate: effectiveDate
-        )
-        
-        if let recurrence = effectiveRecurrence {
-            task.isRecurring = true
-            task.recurrenceInterval = recurrence
+        let parsedProject = result.projectName.flatMap { matchedName in
+            activeProjects.first {
+                $0.name.caseInsensitiveCompare(matchedName) == .orderedSame
+            }
         }
-        
-        modelContext.insert(task)
+        let service = MinuteDataService(modelContext: modelContext)
+        do {
+            _ = try service.createTask(
+                title: finalTitle,
+                project: selectedProject ?? parsedProject,
+                estimatedDuration: selectedDuration ?? result.duration,
+                dueDate: selectedDate ?? result.date,
+                recurrenceInterval: selectedRecurrence ?? result.recurrenceInterval
+            )
+            try service.save()
+        } catch {
+            print("Failed to create task: \(error)")
+            return
+        }
         
         // Reset
         resetComposer()

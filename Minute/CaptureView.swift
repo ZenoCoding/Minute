@@ -2,7 +2,7 @@
 //  CaptureView.swift
 //  Minute
 //
-//  Full-screen "Welcome Home" capture mode for rapid task brain dump.
+//  Full-screen quick capture mode for rapid task brain dump.
 //
 
 import SwiftUI
@@ -15,6 +15,9 @@ struct FullScreenCaptureView: View {
     
     @Query(sort: \Project.createdAt)
     private var allProjects: [Project]
+
+    @Query(sort: \TaskItem.createdAt)
+    private var allTasks: [TaskItem]
     
     private var activeProjects: [Project] {
         allProjects.filter { $0.status == .active }
@@ -39,22 +42,20 @@ struct FullScreenCaptureView: View {
     @State private var showDatePicker = false
     @State private var showProjectPicker = false
     @State private var showDurationPicker = false
+    @State private var showDetails = false
     @State private var customDurationText: String = ""
-    
-    // Added tasks
-    @State private var addedTasks: [AddedTask] = []
+    @State private var newProjectName: String = ""
+    @State private var launchingTask: TaskItem?
+    @State private var launchAnimationTask: Task<Void, Never>?
+    @State private var editingTask: TaskItem?
     
     @FocusState private var isInputFocused: Bool
-    
-    struct AddedTask: Identifiable {
-        let id = UUID()
-        let title: String
-        let projectName: String?
-    }
+    @Namespace private var taskGlassNamespace
+    @Namespace private var taskMotionNamespace
     
     // Effective Values
     var effectiveProject: Project? {
-        selectedProject ?? detectedProject ?? activeProjects.first
+        selectedProject ?? detectedProject
     }
     
     var effectiveDuration: TimeInterval? {
@@ -73,6 +74,51 @@ struct FullScreenCaptureView: View {
         detectedIsEvent
     }
 
+    private var projectCandidates: [SmartInputParser.ProjectCandidate] {
+        activeProjects.map { project in
+            let recentTitles = allTasks
+                .filter { $0.project?.id == project.id }
+                .sorted { $0.createdAt > $1.createdAt }
+                .prefix(12)
+                .map(\.title)
+            let hints = [project.area?.name].compactMap { $0 } + recentTitles
+            return SmartInputParser.ProjectCandidate(name: project.name, hints: hints)
+        }
+    }
+
+    private var topTasks: [TaskItem] {
+        let sortedTasks = allTasks
+            .filter { task in
+                guard !task.isCompleted else { return false }
+                guard let project = task.project else { return false }
+                return project.status == .active
+            }
+            .sorted { lhs, rhs in
+                switch (lhs.dueDate, rhs.dueDate) {
+                case let (left?, right?):
+                    if left != right { return left < right }
+                case (_?, nil):
+                    return true
+                case (nil, _?):
+                    return false
+                case (nil, nil):
+                    break
+                }
+
+                if lhs.orderIndex != rhs.orderIndex {
+                    return lhs.orderIndex < rhs.orderIndex
+                }
+
+                return lhs.createdAt < rhs.createdAt
+            }
+
+        return Array(
+            sortedTasks
+                .filter { $0.id != launchingTask?.id }
+                .prefix(5)
+        )
+    }
+
     private static let fullDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "EEE, MMM d"
@@ -80,145 +126,22 @@ struct FullScreenCaptureView: View {
     }()
     
     var body: some View {
-        ZStack {
-            // Dark background
-            Color(.windowBackgroundColor)
-                .ignoresSafeArea()
-            
-            VStack(spacing: 0) {
-                // Top bar
-                HStack {
-                    Spacer()
-                    
-                    Button {
-                        isPresented = false
-                    } label: {
-                        Text("Done")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                            .background(Color.accentColor, in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .keyboardShortcut(.escape, modifiers: [])
-                }
-                .padding(20)
-                
-                Spacer()
-                
-                // Center content
-                VStack(spacing: 32) {
-                    // Welcome message
-                    VStack(spacing: 8) {
-                        Text("Welcome Back")
-                            .font(.system(size: 36, weight: .bold, design: .rounded))
-                            .foregroundStyle(.primary)
-                        
-                        Text("What's on your mind?")
-                            .font(.title3)
-                            .foregroundStyle(.secondary)
-                    }
-                    
-                    // Large composer
-                    VStack(spacing: 12) {
-                        // Input field
-                        HStack(spacing: 12) {
-                            Image(systemName: "plus.circle.fill")
-                                .font(.title2)
-                                .foregroundStyle(.secondary)
-                            
-                            TextField("Add a task or event...", text: $text)
-                                .textFieldStyle(.plain)
-                                .font(.title3)
-                                .focused($isInputFocused)
-                                .onSubmit {
-                                    createTask()
-                                }
-                                .onChange(of: text) { _, newValue in
-                                    parseTask?.cancel()
-                                    if newValue.isEmpty {
-                                        resetComposer()
-                                    } else {
-                                        let inputSnapshot = newValue
-                                        let projectNames = activeProjects.map(\.name)
-                                        parseTask = Task {
-                                            try? await Task.sleep(for: .milliseconds(120))
-                                            guard !Task.isCancelled else { return }
+        GlassEffectContainer(spacing: 0) {
+            VStack(spacing: 18) {
+                composerBlock
 
-                                            let result = await Task.detached(priority: .userInitiated) {
-                                                SmartInputParser.parseForComposer(text: inputSnapshot, projectNames: projectNames)
-                                            }.value
-                                            guard !Task.isCancelled else { return }
-
-                                            await MainActor.run {
-                                                guard text == inputSnapshot else { return }
-                                                detectedProject = result.projectName.flatMap { matchedName in
-                                                    activeProjects.first {
-                                                        $0.name.caseInsensitiveCompare(matchedName) == .orderedSame
-                                                    }
-                                                }
-                                                detectedDuration = result.duration
-                                                detectedDate = result.date
-                                                detectedRecurrence = result.recurrenceInterval
-                                                detectedIsEvent = result.isEvent
-                                            }
-                                        }
-                                    }
-                                }
-                        }
-                        .padding(16)
-                        .background {
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(Color.black.opacity(0.2))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .stroke(Color.white.opacity(isInputFocused ? 0.2 : 0.1), lineWidth: 1)
-                                )
-                        }
-                        
-                        // Metadata bar
-                        if !text.isEmpty {
-                            metadataBar
-                        }
-                    }
-                    .frame(maxWidth: 500)
-                    
-                    // Added tasks list
-                    if !addedTasks.isEmpty {
-                        VStack(spacing: 8) {
-                            ForEach(addedTasks) { task in
-                                HStack(spacing: 8) {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundStyle(.green)
-                                    Text(task.title)
-                                        .font(.subheadline)
-                                    if let project = task.projectName {
-                                        Text("• \(project)")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .background(Color.black.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
-                            }
-                        }
-                        .frame(maxWidth: 500)
+                if !topTasks.isEmpty {
+                    topTaskList
                         .transition(.move(edge: .top).combined(with: .opacity))
-                    }
                 }
-                .padding(.horizontal, 40)
-                
-                Spacer()
-                
-                // Hint
-                Text("Type a task or `event ...` and press Enter • ESC to close")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .padding(.bottom, 30)
             }
+        }
+        .padding(20)
+        .frame(width: 800, alignment: .center)
+        .frame(maxHeight: 580, alignment: .center)
+        .background(Color.black.opacity(0.001))
+        .onExitCommand {
+            isPresented = false
         }
         .onAppear {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -227,40 +150,146 @@ struct FullScreenCaptureView: View {
         }
         .onDisappear {
             parseTask?.cancel()
+            launchAnimationTask?.cancel()
+        }
+        .sheet(item: $editingTask) { task in
+            EditTaskSheet(task: task)
+        }
+    }
+
+    private var topTaskList: some View {
+        VStack(spacing: 10) {
+            ForEach(topTasks) { task in
+                quickTaskCard(task)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .frame(width: 720)
+        .animation(.spring(response: 0.55, dampingFraction: 0.78), value: topTasks.map(\.id))
+    }
+
+    private var composerBlock: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "plus.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(.secondary)
+
+                TextField("Add a task or event...", text: $text)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 24, weight: .regular))
+                    .focused($isInputFocused)
+                    .onSubmit {
+                        createTask()
+                    }
+                    .onChange(of: text) { _, newValue in
+                        parseTask?.cancel()
+                        if newValue.isEmpty {
+                            resetComposer()
+                        } else {
+                            let inputSnapshot = newValue
+                            let candidateSnapshot = projectCandidates
+                            parseTask = Task {
+                                try? await Task.sleep(for: .milliseconds(120))
+                                guard !Task.isCancelled else { return }
+
+                                let result = SmartInputParser.parseForComposer(
+                                    text: inputSnapshot,
+                                    projectCandidates: candidateSnapshot
+                                )
+                                guard !Task.isCancelled else { return }
+
+                                await MainActor.run {
+                                    guard text == inputSnapshot else { return }
+                                    detectedProject = result.projectName.flatMap { matchedName in
+                                        activeProjects.first {
+                                            $0.name.caseInsensitiveCompare(matchedName) == .orderedSame
+                                        }
+                                    }
+                                    detectedDuration = result.duration
+                                    detectedDate = result.date
+                                    detectedRecurrence = result.recurrenceInterval
+                                    detectedIsEvent = result.isEvent
+                                }
+                            }
+                        }
+                    }
+            }
+            .padding(16)
+
+            if !text.isEmpty {
+                metadataBar
+                    .transition(
+                        .move(edge: .top)
+                            .combined(with: .opacity)
+                    )
+
+                if showDetails {
+                    detailPanel
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+        }
+        .padding(6)
+        .frame(width: 720)
+        .glassEffect(
+            .regular,
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+        )
+        .animation(
+            .spring(response: 0.38, dampingFraction: 0.86),
+            value: text.isEmpty
+        )
+        .overlay {
+            if let launchingTask {
+                quickTaskCard(launchingTask)
+                    .zIndex(1)
+            }
         }
     }
     
     // MARK: - Metadata Bar
     
     var metadataBar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 12) {
             if effectiveIsEvent {
-                HStack(spacing: 4) {
+                HStack(spacing: 6) {
                     Image(systemName: "calendar.badge.plus")
                     Text("Event")
                 }
                 .font(.caption)
                 .foregroundStyle(.blue)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.black.opacity(0.2), in: Capsule())
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .glassEffect(.clear.interactive(), in: Capsule())
+                .overlay {
+                    Capsule().stroke(.primary.opacity(0.18), lineWidth: 1)
+                }
             } else {
                 // Project
                 Button { showProjectPicker = true } label: {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 6) {
                         if let icon = effectiveProject?.area?.iconName {
                             Image(systemName: icon)
-                        } else {
+                        } else if effectiveProject != nil {
                             Image(systemName: "folder")
+                        } else {
+                            Image(systemName: "tray")
                         }
                         if let project = effectiveProject {
                             Text(project.name)
+                        } else {
+                            Text("Inbox")
                         }
                     }
                     .font(.caption)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color.black.opacity(0.2), in: Capsule())
+                    .foregroundStyle(effectiveProject == nil ? .secondary : .primary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .glassEffect(.clear.interactive(), in: Capsule())
+                    .overlay {
+                        Capsule().stroke(.primary.opacity(0.18), lineWidth: 1)
+                    }
                 }
                 .buttonStyle(.plain)
                 .popover(isPresented: $showProjectPicker, arrowEdge: .bottom) {
@@ -270,15 +299,18 @@ struct FullScreenCaptureView: View {
             
             // Date
             Button { showDatePicker = true } label: {
-                HStack(spacing: 4) {
+                HStack(spacing: 6) {
                     Image(systemName: "calendar")
                     Text(effectiveDate.map { formatDate($0) } ?? "Today")
                 }
                 .font(.caption)
                 .foregroundStyle(effectiveDate.map { isToday($0) ? Color.green : Color.primary } ?? Color.primary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.black.opacity(0.2), in: Capsule())
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .glassEffect(.clear.interactive(), in: Capsule())
+                .overlay {
+                    Capsule().stroke(.primary.opacity(0.18), lineWidth: 1)
+                }
             }
             .buttonStyle(.plain)
             .popover(isPresented: $showDatePicker, arrowEdge: .bottom) {
@@ -287,66 +319,206 @@ struct FullScreenCaptureView: View {
             
             // Duration
             if let duration = effectiveDuration {
-                HStack(spacing: 4) {
+                HStack(spacing: 6) {
                     Image(systemName: "hourglass")
                     Text(formatDuration(duration))
                 }
                 .font(.caption)
                 .foregroundStyle(.blue)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.black.opacity(0.2), in: Capsule())
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .glassEffect(.clear.interactive(), in: Capsule())
+                .overlay {
+                    Capsule().stroke(.primary.opacity(0.18), lineWidth: 1)
+                }
             }
             
             // Recurrence
             if !effectiveIsEvent, let recurrence = effectiveRecurrence {
-                HStack(spacing: 4) {
+                HStack(spacing: 6) {
                     Image(systemName: "repeat")
                     Text(recurrence.capitalized)
                 }
                 .font(.caption)
                 .foregroundStyle(.purple)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.black.opacity(0.2), in: Capsule())
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .glassEffect(.clear.interactive(), in: Capsule())
+                .overlay {
+                    Capsule().stroke(.primary.opacity(0.18), lineWidth: 1)
+                }
             }
             
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                    showDetails.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: showDetails ? "chevron.up" : "slider.horizontal.3")
+                    Text("Details")
+                }
+                .font(.caption)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .glassEffect(.clear.interactive(), in: Capsule())
+                .overlay {
+                    Capsule().stroke(.primary.opacity(0.18), lineWidth: 1)
+                }
+            }
+            .buttonStyle(.plain)
+
             Spacer()
         }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+        .offset(y: -6)
+    }
+
+    @ViewBuilder
+    private func quickTaskCard(_ task: TaskItem) -> some View {
+        if let project = task.project {
+            TaskStreamRow(
+                item: StreamItem(task: task, project: project),
+                activeProjects: activeProjects,
+                onEdit: { editingTask = task }
+            )
+            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .glassEffectID(task.id, in: taskGlassNamespace)
+            .glassEffectTransition(.matchedGeometry)
+            .matchedGeometryEffect(id: task.id, in: taskMotionNamespace)
+        }
+    }
+
+    var detailPanel: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                if !effectiveIsEvent {
+                    Button { showProjectPicker = true } label: {
+                        detailControl(
+                            icon: effectiveProject?.area?.iconName ?? (effectiveProject == nil ? "tray" : "folder"),
+                            title: "Project",
+                            value: effectiveProject?.name ?? "Inbox"
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Button { showDatePicker = true } label: {
+                    detailControl(
+                        icon: "calendar",
+                        title: effectiveIsEvent ? "When" : "Due",
+                        value: effectiveDate.map { formatDate($0) } ?? "Today"
+                    )
+                }
+                .buttonStyle(.plain)
+
+                Button { showDurationPicker = true } label: {
+                    detailControl(
+                        icon: "hourglass",
+                        title: "Estimate",
+                        value: effectiveDuration.map { formatDuration($0) } ?? "Add"
+                    )
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showDurationPicker, arrowEdge: .bottom) {
+                    durationPicker
+                }
+
+                if !effectiveIsEvent {
+                    Menu {
+                        Button("None") { selectedRecurrence = nil }
+                        Button("Daily") { selectedRecurrence = "daily" }
+                        Button("Weekly") { selectedRecurrence = "weekly" }
+                    } label: {
+                        detailControl(
+                            icon: "repeat",
+                            title: "Repeat",
+                            value: effectiveRecurrence?.capitalized ?? "None"
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .menuStyle(.borderlessButton)
+                }
+            }
+        }
+        .padding(12)
+        .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func detailControl(icon: String, title: String, value: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.body)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
+        .glassEffect(.clear.interactive(), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
     
     // MARK: - Pickers
     
     var projectPicker: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(activeProjects) { project in
-                    Button {
-                        selectedProject = project
-                        showProjectPicker = false
-                    } label: {
-                        HStack {
-                            if let icon = project.area?.iconName {
-                                Image(systemName: icon)
-                                    .foregroundStyle(Color(hex: project.area?.themeColor ?? "") ?? .secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                TextField("New project", text: $newProjectName)
+                    .textFieldStyle(.plain)
+                    .onSubmit(createProjectFromPicker)
+
+                Button(action: createProjectFromPicker) {
+                    Image(systemName: "plus.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .disabled(newProjectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(8)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(activeProjects) { project in
+                        Button {
+                            selectedProject = project
+                            showProjectPicker = false
+                        } label: {
+                            HStack {
+                                if let icon = project.area?.iconName {
+                                    Image(systemName: icon)
+                                        .foregroundStyle(Color(hex: project.area?.themeColor ?? "") ?? .secondary)
+                                }
+                                Text(project.name)
+                                Spacer()
+                                if effectiveProject?.id == project.id {
+                                    Image(systemName: "checkmark")
+                                        .font(.caption)
+                                }
                             }
-                            Text(project.name)
-                            Spacer()
-                            if effectiveProject?.id == project.id {
-                                Image(systemName: "checkmark")
-                                    .font(.caption)
-                            }
+                            .padding(.vertical, 6)
+                            .padding(.horizontal, 8)
+                            .contentShape(Rectangle())
                         }
-                        .padding(.vertical, 6)
-                        .padding(.horizontal, 8)
-                        .contentShape(Rectangle())
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
-            .padding()
         }
-        .frame(width: 200, height: 200)
+        .padding()
+        .frame(width: 230, height: 250)
     }
     
     var datePicker: some View {
@@ -367,14 +539,93 @@ struct FullScreenCaptureView: View {
         .padding()
         .frame(width: 280)
     }
+
+    var durationPicker: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Image(systemName: "keyboard")
+                    .foregroundStyle(.secondary)
+                TextField("Minutes", text: $customDurationText)
+                    .textFieldStyle(.plain)
+                    .frame(width: 80)
+                    .onSubmit {
+                        if let minutes = Double(customDurationText) {
+                            selectedDuration = minutes * 60
+                            customDurationText = ""
+                            showDurationPicker = false
+                        }
+                    }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(Color.black.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+
+            Divider()
+
+            ForEach([900, 1800, 2700, 3600, 7200], id: \.self) { seconds in
+                Button {
+                    selectedDuration = TimeInterval(seconds)
+                    showDurationPicker = false
+                } label: {
+                    HStack {
+                        Text(formatDuration(TimeInterval(seconds)))
+                        Spacer()
+                        if effectiveDuration == TimeInterval(seconds) {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding()
+        .frame(width: 180)
+    }
     
     // MARK: - Actions
+
+    private func deleteTask(_ task: TaskItem) {
+        withAnimation(.snappy) {
+            modelContext.delete(task)
+        }
+
+        do {
+            try modelContext.save()
+        } catch {
+            print("Failed to delete task: \(error)")
+        }
+    }
+
+    private func createProjectFromPicker() {
+        let name = newProjectName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+
+        do {
+            let service = MinuteDataService(modelContext: modelContext)
+            if let existingProject = try service.findProject(named: name) {
+                selectedProject = existingProject
+            } else {
+                selectedProject = try service.createProject(name: name)
+                try service.save()
+            }
+        } catch {
+            print("Failed to create project: \(error)")
+            return
+        }
+
+        newProjectName = ""
+        showProjectPicker = false
+    }
     
     private func createTask() {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         
-        let parsed = SmartInputParser.parse(text: trimmed, projects: activeProjects)
+        let parsed = SmartInputParser.parseForComposer(
+            text: trimmed,
+            projectCandidates: projectCandidates
+        )
         let cleanTitle = parsed.cleanTitle.isEmpty ? trimmed : parsed.cleanTitle
 
         if parsed.isEvent {
@@ -386,29 +637,49 @@ struct FullScreenCaptureView: View {
             )
 
             if createdEvent {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    addedTasks.insert(AddedTask(title: cleanTitle, projectName: "Calendar"), at: 0)
-                }
                 resetComposer()
                 text = ""
                 return
             }
+
+            return
+        }
+
+        let parsedProject = parsed.projectName.flatMap { matchedName in
+            activeProjects.first {
+                $0.name.caseInsensitiveCompare(matchedName) == .orderedSame
+            }
+        }
+        let recurrence = selectedRecurrence ?? parsed.recurrenceInterval
+        let service = MinuteDataService(modelContext: modelContext)
+        let task: TaskItem
+
+        do {
+            task = try service.createTask(
+                title: cleanTitle,
+                project: selectedProject ?? parsedProject,
+                estimatedDuration: selectedDuration ?? parsed.duration,
+                dueDate: selectedDate ?? parsed.date ?? Date(),
+                recurrenceInterval: recurrence
+            )
+            try service.save()
+        } catch {
+            print("Failed to create task: \(error)")
+            return
         }
         
-        let task = TaskItem(
-            title: cleanTitle,
-            project: effectiveProject,
-            estimatedDuration: effectiveDuration,
-            dueDate: effectiveDate ?? Date()
-        )
-        task.isRecurring = effectiveRecurrence != nil
-        task.recurrenceInterval = effectiveRecurrence
-        
-        modelContext.insert(task)
-        
-        // Track for UI
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-            addedTasks.insert(AddedTask(title: cleanTitle, projectName: effectiveProject?.name), at: 0)
+        launchAnimationTask?.cancel()
+        launchingTask = task
+
+        launchAnimationTask = Task {
+            try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                withAnimation(.spring(response: 0.7, dampingFraction: 0.82)) {
+                    launchingTask = nil
+                }
+            }
         }
         
         // Reset for next task
@@ -426,6 +697,7 @@ struct FullScreenCaptureView: View {
         selectedDate = nil
         selectedDuration = nil
         selectedRecurrence = nil
+        showDetails = false
     }
     
     private func formatDate(_ date: Date) -> String {

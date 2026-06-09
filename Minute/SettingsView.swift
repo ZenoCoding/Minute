@@ -8,6 +8,7 @@
 import SwiftUI
 import SwiftData
 import EventKit
+import Combine
 
 struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
@@ -23,8 +24,12 @@ struct SettingsView: View {
     @AppStorage(DayCapacitySettings.sleepWeekendBedMinutesKey) private var sleepWeekendBedMinutes = DayCapacitySettings.defaultSleepWeekendBedMinutes
     @AppStorage(CalendarManager.includeSpecialDaysKey) private var includeSpecialDays = true
     @AppStorage(CalendarManager.includeRecurringMeetingsKey) private var includeRecurringMeetings = true
+    @AppStorage("shortcutActivationMode") private var shortcutActivationMode = ShortcutActivationMode.doubleOption.rawValue
     
     @State private var showClearCompletedConfirm = false
+    @State private var isAccessibilityGranted = ShortcutManager.isAccessibilityTrusted
+    
+    private let accessibilityTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
     @State private var showClearAllConfirm = false
     @State private var clearMessage: String?
     
@@ -38,6 +43,8 @@ struct SettingsView: View {
                 capacityPlanningSection
 
                 calendarHighlightsSection
+                
+                keyboardShortcutsSection
                 
                 aboutSection
                 
@@ -108,6 +115,79 @@ struct SettingsView: View {
             }
             .padding()
             .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+    
+    var keyboardShortcutsSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Keyboard Shortcuts")
+                .font(.headline)
+            
+            VStack(alignment: .leading, spacing: 12) {
+                // Shortcut type picker
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Composer Hotkey")
+                            .font(.body)
+                        Text("Quickly show or hide the composer overlay.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Picker("", selection: $shortcutActivationMode) {
+                        ForEach(ShortcutActivationMode.allCases) { mode in
+                            Text(mode.title).tag(mode.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 200)
+                }
+                
+                // If hotkey is enabled (i.e. not .disabled), show accessibility information
+                if shortcutActivationMode != ShortcutActivationMode.disabled.rawValue {
+                    Divider()
+                        .padding(.vertical, 4)
+                    
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: isAccessibilityGranted ? "lock.shield.fill" : "exclamationmark.shield.fill")
+                            .font(.title2)
+                            .foregroundStyle(isAccessibilityGranted ? .green : .orange)
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Global Activation Status")
+                                .font(.body.weight(.medium))
+                            
+                            if isAccessibilityGranted {
+                                Text("Accessibility permission granted. You can activate the composer from any application.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text("Accessibility permission required to detect shortcuts globally (while Minute is in the background). Otherwise, the hotkey only works when Minute is active.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                
+                                Button("Grant Permission") {
+                                    ShortcutManager.requestAccessibilityPermission()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .padding(.top, 4)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding()
+            .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .onReceive(accessibilityTimer) { _ in
+            let trusted = ShortcutManager.isAccessibilityTrusted
+            if isAccessibilityGranted != trusted {
+                isAccessibilityGranted = trusted
+            }
         }
     }
     
