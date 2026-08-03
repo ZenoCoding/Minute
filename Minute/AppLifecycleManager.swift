@@ -10,10 +10,10 @@ import SwiftData
 
 struct AppLifecycleManager: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.openSettings) private var openSettings
     @EnvironmentObject var calendarManager: CalendarManager
+    @EnvironmentObject var quickComposerCoordinator: QuickComposerCoordinator
     @State private var isInitialized = false
-    @State private var showSettings = false
-    @State private var capturePanelController = CapturePanelController()
     @State private var commandProcessor: MinuteCommandProcessor?
     
     var body: some View {
@@ -21,16 +21,12 @@ struct AppLifecycleManager: View {
             .toolbar {
                 ToolbarItem(placement: .automatic) {
                     Button {
-                        showSettings = true
+                        openSettings()
                     } label: {
                         Image(systemName: "gearshape")
                     }
                     .help("Settings")
                 }
-            }
-            .sheet(isPresented: $showSettings) {
-                SettingsView()
-                    .frame(width: 400, height: 500)
             }
             .environmentObject(calendarManager)
             .task {
@@ -44,24 +40,7 @@ struct AppLifecycleManager: View {
                 processor.start()
                 commandProcessor = processor
 
-                ShortcutManager.shared.startMonitoring()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .showCaptureMode)) { _ in
-                capturePanelController.show(
-                    modelContext: modelContext,
-                    calendarManager: calendarManager
-                )
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .toggleCaptureMode)) { _ in
-                capturePanelController.toggle(
-                    modelContext: modelContext,
-                    calendarManager: calendarManager
-                )
+                quickComposerCoordinator.start()
             }
     }
-}
-
-extension Notification.Name {
-    static let showCaptureMode = Notification.Name("showCaptureMode")
-    static let toggleCaptureMode = Notification.Name("toggleCaptureMode")
 }

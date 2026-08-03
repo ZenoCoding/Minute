@@ -162,12 +162,9 @@ enum MinuteCommandAPIError: LocalizedError {
 
 enum MinuteCommandPaths {
     static func root(fileManager: FileManager = .default) throws -> URL {
-        let applicationSupport = try fileManager.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
+        let applicationSupport = MinuteStoreLocation
+            .resolvedURL(fileManager: fileManager)
+            .deletingLastPathComponent()
         return applicationSupport
             .appendingPathComponent("Minute", isDirectory: true)
             .appendingPathComponent("Commands", isDirectory: true)

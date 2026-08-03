@@ -240,6 +240,9 @@ struct EditTaskSheet: View {
     }
     
     private func saveChanges() {
+        if selectedProject?.id != task.project?.id, let selectedProject {
+            ProjectInferenceMemory.record(text: title, projectName: selectedProject.name)
+        }
         task.title = title
         task.project = selectedProject
         task.dueDate = dueDate

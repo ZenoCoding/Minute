@@ -12,6 +12,7 @@ struct FullScreenCaptureView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject var calendarManager: CalendarManager
     @Binding var isPresented: Bool
+    let onAuxiliaryPresentationChanged: (Bool) -> Void
     
     @Query(sort: \Project.createdAt)
     private var allProjects: [Project]
@@ -37,6 +38,9 @@ struct FullScreenCaptureView: View {
     @State private var selectedDuration: TimeInterval?
     @State private var selectedRecurrence: String?
     @State private var parseTask: Task<Void, Never>?
+    @State private var inferenceTask: Task<Void, Never>?
+    @State private var isInferringProject = false
+    @AppStorage(CodexProjectInferenceSettings.enabledKey) private var experimentalCodexInferenceEnabled = false
     
     // Pickers
     @State private var showDatePicker = false
@@ -119,6 +123,10 @@ struct FullScreenCaptureView: View {
         )
     }
 
+    private var isPresentingAuxiliaryUI: Bool {
+        showDatePicker || showProjectPicker || showDurationPicker || editingTask != nil
+    }
+
     private static let fullDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "EEE, MMM d"
@@ -137,20 +145,28 @@ struct FullScreenCaptureView: View {
             }
         }
         .padding(20)
-        .frame(width: 800, alignment: .center)
-        .frame(maxHeight: 580, alignment: .center)
+        .frame(maxWidth: 800, alignment: .center)
+        .frame(maxWidth: .infinity, maxHeight: 580, alignment: .center)
         .background(Color.black.opacity(0.001))
         .onExitCommand {
             isPresented = false
         }
-        .onAppear {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                isInputFocused = true
-            }
+        .task {
+            // The controller installs a fresh root view for every presentation,
+            // so this task runs (and is cancelled) once per panel session.
+            try? await Task.sleep(for: .milliseconds(50))
+            guard !Task.isCancelled else { return }
+            isInputFocused = true
         }
         .onDisappear {
             parseTask?.cancel()
+            inferenceTask?.cancel()
             launchAnimationTask?.cancel()
+            isInputFocused = false
+            onAuxiliaryPresentationChanged(false)
+        }
+        .onChange(of: isPresentingAuxiliaryUI) { _, isPresented in
+            onAuxiliaryPresentationChanged(isPresented)
         }
         .sheet(item: $editingTask) { task in
             EditTaskSheet(task: task)
@@ -164,7 +180,7 @@ struct FullScreenCaptureView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .frame(width: 720)
+        .frame(maxWidth: 720)
         .animation(.spring(response: 0.55, dampingFraction: 0.78), value: topTasks.map(\.id))
     }
 
@@ -184,6 +200,9 @@ struct FullScreenCaptureView: View {
                     }
                     .onChange(of: text) { _, newValue in
                         parseTask?.cancel()
+                        inferenceTask?.cancel()
+                        inferenceTask = nil
+                        isInferringProject = false
                         if newValue.isEmpty {
                             resetComposer()
                         } else {
@@ -201,19 +220,34 @@ struct FullScreenCaptureView: View {
 
                                 await MainActor.run {
                                     guard text == inputSnapshot else { return }
-                                    detectedProject = result.projectName.flatMap { matchedName in
+                                    let locallyDetectedProject = result.projectName.flatMap { matchedName in
                                         activeProjects.first {
                                             $0.name.caseInsensitiveCompare(matchedName) == .orderedSame
                                         }
+                                    }
+                                    if let locallyDetectedProject {
+                                        detectedProject = locallyDetectedProject
                                     }
                                     detectedDuration = result.duration
                                     detectedDate = result.date
                                     detectedRecurrence = result.recurrenceInterval
                                     detectedIsEvent = result.isEvent
+
+                                    if locallyDetectedProject == nil, !result.isEvent {
+                                        scheduleLiveProjectInference(
+                                            text: inputSnapshot,
+                                            candidates: candidateSnapshot
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
+
+                if isInferringProject {
+                    ProjectInferenceSpinner()
+                        .transition(.scale.combined(with: .opacity))
+                }
             }
             .padding(16)
 
@@ -228,14 +262,22 @@ struct FullScreenCaptureView: View {
                     detailPanel
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
+
             }
         }
         .padding(6)
-        .frame(width: 720)
+        .frame(maxWidth: 720)
         .glassEffect(
             .regular,
             in: RoundedRectangle(cornerRadius: 20, style: .continuous)
         )
+        .overlay {
+            if isInferringProject {
+                ProjectInferenceGlow(cornerRadius: 20)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: isInferringProject)
         .animation(
             .spring(response: 0.38, dampingFraction: 0.86),
             value: text.isEmpty
@@ -301,7 +343,7 @@ struct FullScreenCaptureView: View {
             Button { showDatePicker = true } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "calendar")
-                    Text(effectiveDate.map { formatDate($0) } ?? "Today")
+                    Text(effectiveDate.map { formatDate($0) } ?? "No date")
                 }
                 .font(.caption)
                 .foregroundStyle(effectiveDate.map { isToday($0) ? Color.green : Color.primary } ?? Color.primary)
@@ -408,7 +450,7 @@ struct FullScreenCaptureView: View {
                     detailControl(
                         icon: "calendar",
                         title: effectiveIsEvent ? "When" : "Due",
-                        value: effectiveDate.map { formatDate($0) } ?? "Today"
+                        value: effectiveDate.map { formatDate($0) } ?? "No date"
                     )
                 }
                 .buttonStyle(.plain)
@@ -494,6 +536,7 @@ struct FullScreenCaptureView: View {
                     ForEach(activeProjects) { project in
                         Button {
                             selectedProject = project
+                            ProjectInferenceMemory.record(text: text, projectName: project.name)
                             showProjectPicker = false
                         } label: {
                             HStack {
@@ -528,6 +571,10 @@ struct FullScreenCaptureView: View {
                 Button("Tomorrow") { 
                     selectedDate = DueDateSupport.presetTomorrow()
                     showDatePicker = false 
+                }
+                Button("No Date") {
+                    selectedDate = nil
+                    showDatePicker = false
                 }
             }
             .controlSize(.small)
@@ -650,22 +697,114 @@ struct FullScreenCaptureView: View {
                 $0.name.caseInsensitiveCompare(matchedName) == .orderedSame
             }
         }
-        let recurrence = selectedRecurrence ?? parsed.recurrenceInterval
+
+        let resolvedProject = selectedProject ?? detectedProject ?? parsedProject
+        if let selectedProject {
+            ProjectInferenceMemory.record(text: trimmed, projectName: selectedProject.name)
+        }
+
+        let createdTask = finishTask(
+            title: cleanTitle,
+            project: resolvedProject,
+            duration: selectedDuration ?? parsed.duration,
+            date: selectedDate ?? parsed.date,
+            recurrence: selectedRecurrence ?? parsed.recurrenceInterval
+        )
+
+        if let createdTask,
+           experimentalCodexInferenceEnabled,
+           resolvedProject == nil,
+           !projectCandidates.isEmpty {
+            improveProjectAfterCapture(
+                task: createdTask,
+                text: trimmed,
+                candidates: projectCandidates
+            )
+        }
+    }
+
+    private func scheduleLiveProjectInference(
+        text input: String,
+        candidates: [SmartInputParser.ProjectCandidate]
+    ) {
+        guard experimentalCodexInferenceEnabled, !candidates.isEmpty else { return }
+        inferenceTask?.cancel()
+
+        inferenceTask = Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard text == input, selectedProject == nil else { return }
+                isInferringProject = true
+            }
+            let inferredName = try? await CodexProjectInferenceService.inferProjectName(
+                text: input,
+                candidates: candidates
+            )
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                guard text == input, selectedProject == nil else { return }
+                isInferringProject = false
+                inferenceTask = nil
+                let inferredProject = inferredName.flatMap { name in
+                    activeProjects.first {
+                        $0.name.caseInsensitiveCompare(name) == .orderedSame
+                    }
+                }
+                if let inferredProject {
+                    detectedProject = inferredProject
+                }
+            }
+        }
+    }
+
+    private func improveProjectAfterCapture(
+        task: TaskItem,
+        text: String,
+        candidates: [SmartInputParser.ProjectCandidate]
+    ) {
+        Task {
+            let inferredName = try? await CodexProjectInferenceService.inferProjectName(
+                text: text,
+                candidates: candidates
+            )
+            guard let inferredName,
+                  let project = activeProjects.first(where: {
+                      $0.name.caseInsensitiveCompare(inferredName) == .orderedSame
+                  }) else { return }
+
+            await MainActor.run {
+                guard task.modelContext != nil else { return }
+                task.project = project
+                try? modelContext.save()
+            }
+        }
+    }
+
+    @discardableResult
+    private func finishTask(
+        title: String,
+        project: Project?,
+        duration: TimeInterval?,
+        date: Date?,
+        recurrence: String?
+    ) -> TaskItem? {
         let service = MinuteDataService(modelContext: modelContext)
         let task: TaskItem
 
         do {
             task = try service.createTask(
-                title: cleanTitle,
-                project: selectedProject ?? parsedProject,
-                estimatedDuration: selectedDuration ?? parsed.duration,
-                dueDate: selectedDate ?? parsed.date ?? Date(),
+                title: title,
+                project: project,
+                estimatedDuration: duration,
+                dueDate: date,
                 recurrenceInterval: recurrence
             )
             try service.save()
         } catch {
             print("Failed to create task: \(error)")
-            return
+            return nil
         }
         
         launchAnimationTask?.cancel()
@@ -685,6 +824,7 @@ struct FullScreenCaptureView: View {
         // Reset for next task
         resetComposer()
         text = ""
+        return task
     }
     
     private func resetComposer() {

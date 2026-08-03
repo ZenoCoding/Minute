@@ -21,17 +21,11 @@ struct OrbitView: View {
     }
     
     var body: some View {
-        HStack(spacing: 0) {
+        HSplitView {
             // Left: The Task Stream (Primary Focus)
             TaskStreamView()
-                .frame(width: 350)
+                .frame(minWidth: 360, idealWidth: 480, maxWidth: 680)
                 .background(Color.black.opacity(0.1)) // Subtle separation
-                .overlay(
-                    Rectangle()
-                        .frame(width: 1)
-                        .foregroundStyle(Color.white.opacity(0.1)),
-                    alignment: .trailing
-                )
             
             // Right: The Orbit (Context/Planning)
             NavigationStack(path: $navigationPath) {
@@ -53,6 +47,7 @@ struct OrbitView: View {
                     AreaDetailView(area: area)
                 }
             }
+            .frame(minWidth: 420)
         }
         .background(Color(.windowBackgroundColor))
     }

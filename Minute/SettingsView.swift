@@ -25,6 +25,7 @@ struct SettingsView: View {
     @AppStorage(CalendarManager.includeSpecialDaysKey) private var includeSpecialDays = true
     @AppStorage(CalendarManager.includeRecurringMeetingsKey) private var includeRecurringMeetings = true
     @AppStorage("shortcutActivationMode") private var shortcutActivationMode = ShortcutActivationMode.doubleOption.rawValue
+    @AppStorage(CodexProjectInferenceSettings.enabledKey) private var experimentalCodexInferenceEnabled = false
     
     @State private var showClearCompletedConfirm = false
     @State private var isAccessibilityGranted = ShortcutManager.isAccessibilityTrusted
@@ -37,6 +38,8 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 header
+
+                experimentalInferenceSection
                 
                 dataManagementSection
 
@@ -54,6 +57,32 @@ struct SettingsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var experimentalInferenceSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Experimental AI")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle(isOn: $experimentalCodexInferenceEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Use local Codex for project inference")
+                            .font(.body)
+                        Text("When local matching is uncertain, let the installed Codex CLI suggest a project without delaying capture.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+
+                Text("Optional and off by default. Task text, project names, and recent task hints are sent to Codex. Minute never reads or stores Codex credentials; if Codex is unavailable, times out, or returns an unknown project, the task is still saved and the local parser or Inbox fallback is used.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding()
+            .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 8))
+        }
     }
 
     var calendarHighlightsSection: some View {
@@ -278,10 +307,7 @@ struct SettingsView: View {
     }
     
     var storageSize: String {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-        guard let storeURL = appSupport?.appendingPathComponent("default.store") else {
-            return "Unknown"
-        }
+        let storeURL = MinuteStoreLocation.resolvedURL()
         
         do {
             let attrs = try FileManager.default.attributesOfItem(atPath: storeURL.path)

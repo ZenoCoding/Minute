@@ -8,6 +8,106 @@
 import Foundation
 import NaturalLanguage
 
+struct ProjectInferenceMemory {
+    struct Example: Codable, Equatable {
+        let signature: String
+        let projectName: String
+        let updatedAt: Date
+    }
+
+    static let storageKey = "projectInferenceCorrectionExamples"
+    private static let maximumExamples = 200
+    private static let ignoredWords: Set<String> = [
+        "and", "the", "for", "with", "from", "into", "this", "that",
+        "task", "work", "finish", "start", "make", "update", "review",
+        "write", "draft", "do", "complete", "on", "at", "to", "of"
+    ]
+
+    static func record(
+        text: String,
+        projectName: String,
+        defaults: UserDefaults = .standard,
+        now: Date = Date()
+    ) {
+        let signature = signature(for: text)
+        let cleanProjectName = projectName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !signature.isEmpty, !cleanProjectName.isEmpty else { return }
+
+        var examples = load(defaults: defaults)
+        examples.removeAll { $0.signature == signature }
+        examples.insert(
+            Example(signature: signature, projectName: cleanProjectName, updatedAt: now),
+            at: 0
+        )
+        if examples.count > maximumExamples {
+            examples.removeLast(examples.count - maximumExamples)
+        }
+        if let data = try? JSONEncoder().encode(examples) {
+            defaults.set(data, forKey: storageKey)
+        }
+    }
+
+    static func inferredProjectName(
+        for text: String,
+        candidateNames: [String],
+        defaults: UserDefaults = .standard
+    ) -> String? {
+        bestMatch(
+            for: text,
+            examples: load(defaults: defaults),
+            candidateNames: candidateNames
+        )
+    }
+
+    static func bestMatch(
+        for text: String,
+        examples: [Example],
+        candidateNames: [String]
+    ) -> String? {
+        let inputSignature = signature(for: text)
+        guard !inputSignature.isEmpty else { return nil }
+
+        let validNames = Dictionary(uniqueKeysWithValues: candidateNames.map {
+            ($0.lowercased(), $0)
+        })
+        let inputTokens = Set(inputSignature.split(separator: " ").map(String.init))
+        var best: (projectName: String, score: Double, date: Date)?
+
+        for example in examples {
+            guard let validName = validNames[example.projectName.lowercased()] else { continue }
+            let exampleTokens = Set(example.signature.split(separator: " ").map(String.init))
+            let unionCount = inputTokens.union(exampleTokens).count
+            guard unionCount > 0 else { continue }
+            let score = Double(inputTokens.intersection(exampleTokens).count) / Double(unionCount)
+            guard score >= 0.72 else { continue }
+
+            if score > (best?.score ?? -1) ||
+                (score == best?.score && example.updatedAt > (best?.date ?? .distantPast)) {
+                best = (validName, score, example.updatedAt)
+            }
+        }
+
+        return best?.projectName
+    }
+
+    private static func load(defaults: UserDefaults) -> [Example] {
+        guard let data = defaults.data(forKey: storageKey),
+              let examples = try? JSONDecoder().decode([Example].self, from: data) else {
+            return []
+        }
+        return examples
+    }
+
+    private static func signature(for text: String) -> String {
+        text.lowercased()
+            .components(separatedBy: .alphanumerics.inverted)
+            .filter { token in
+                token.count >= 2 && !ignoredWords.contains(token) && Int(token) == nil
+            }
+            .joined(separator: " ")
+    }
+}
+
 struct SmartInputParser {
 
     enum EntryType: String, Sendable {
@@ -169,6 +269,15 @@ struct SmartInputParser {
                     break
                 }
             }
+        }
+
+        // 1.5. Corrections made during ordinary use become durable local examples.
+        // This keeps familiar phrases off the LLM path after the user has taught Minute once.
+        if foundProjectName == nil {
+            foundProjectName = ProjectInferenceMemory.inferredProjectName(
+                for: lowerText,
+                candidateNames: sortedCandidates.map(\.name)
+            )
         }
         
         // 2. Weighted token match against the project name, area, and recent task titles.

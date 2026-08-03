@@ -4,6 +4,7 @@ import SwiftData
 
 struct MenubarView: View {
     @EnvironmentObject var calendarManager: CalendarManager
+    @EnvironmentObject var quickComposerCoordinator: QuickComposerCoordinator
     @Environment(\.modelContext) private var modelContext
     
     // Query for active tasks
@@ -141,7 +142,7 @@ struct MenubarView: View {
             Divider().opacity(0.3)
             HStack {
                 Button {
-                    NotificationCenter.default.post(name: .showCaptureMode, object: nil)
+                    quickComposerCoordinator.show()
                 } label: {
                     Label("Capture", systemImage: "plus.circle")
                 }

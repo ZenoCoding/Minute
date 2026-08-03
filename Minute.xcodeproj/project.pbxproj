@@ -8,6 +8,7 @@
 
 /* Begin PBXFileReference section */
 		7B5A08782F08554900FA9623 /* Minute.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Minute.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B10000000000000000000001 /* MinuteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MinuteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -16,10 +17,22 @@
 			path = Minute;
 			sourceTree = "<group>";
 		};
+		B10000000000000000000002 /* MinuteTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MinuteTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		7B5A08752F08554900FA9623 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B10000000000000000000003 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -33,6 +46,7 @@
 			isa = PBXGroup;
 			children = (
 				7B5A087A2F08554900FA9623 /* Minute */,
+				B10000000000000000000002 /* MinuteTests */,
 				7B5A08792F08554900FA9623 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,11 +55,30 @@
 			isa = PBXGroup;
 			children = (
 				7B5A08782F08554900FA9623 /* Minute.app */,
+				B10000000000000000000001 /* MinuteTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
+
+/* Begin PBXContainerItemProxy section */
+		B10000000000000000000004 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7B5A08702F08554900FA9623 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7B5A08772F08554900FA9623;
+			remoteInfo = Minute;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXTargetDependency section */
+		B10000000000000000000005 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 7B5A08772F08554900FA9623 /* Minute */;
+			targetProxy = B10000000000000000000004 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin PBXNativeTarget section */
 		7B5A08772F08554900FA9623 /* Minute */ = {
@@ -69,6 +102,27 @@
 			productName = Minute;
 			productReference = 7B5A08782F08554900FA9623 /* Minute.app */;
 			productType = "com.apple.product-type.application";
+		};
+		B10000000000000000000006 /* MinuteTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B10000000000000000000007 /* Build configuration list for PBXNativeTarget "MinuteTests" */;
+			buildPhases = (
+				B10000000000000000000008 /* Sources */,
+				B10000000000000000000003 /* Frameworks */,
+				B10000000000000000000009 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B10000000000000000000005 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				B10000000000000000000002 /* MinuteTests */,
+			);
+			name = MinuteTests;
+			productName = MinuteTests;
+			productReference = B10000000000000000000001 /* MinuteTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -100,6 +154,7 @@
 			projectRoot = "";
 			targets = (
 				7B5A08772F08554900FA9623 /* Minute */,
+				B10000000000000000000006 /* MinuteTests */,
 			);
 		};
 /* End PBXProject section */
@@ -112,10 +167,24 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B10000000000000000000009 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		7B5A08742F08554900FA9623 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B10000000000000000000008 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -329,6 +398,43 @@
 			};
 			name = Release;
 		};
+		B1000000000000000000000A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.2;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tychoyoung.MinuteTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Minute.app/Contents/MacOS/Minute";
+			};
+			name = Debug;
+		};
+		B1000000000000000000000B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.2;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tychoyoung.MinuteTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Minute.app/Contents/MacOS/Minute";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -346,6 +452,15 @@
 			buildConfigurations = (
 				7B5A08842F08554A00FA9623 /* Debug */,
 				7B5A08852F08554A00FA9623 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B10000000000000000000007 /* Build configuration list for PBXNativeTarget "MinuteTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B1000000000000000000000A /* Debug */,
+				B1000000000000000000000B /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -12,7 +12,7 @@ enum ShortcutActivationMode: String, CaseIterable, Identifiable {
     case doubleOption = "doubleOption"
     case bothOptions = "bothOptions"
     case disabled = "disabled"
-    
+
     var id: String { self.rawValue }
     var title: String {
         switch self {
@@ -23,151 +23,251 @@ enum ShortcutActivationMode: String, CaseIterable, Identifiable {
     }
 }
 
-class ShortcutManager {
-    static let shared = ShortcutManager()
-    
-    private var localMonitor: Any?
-    private var globalMonitor: Any?
-    
-    // State to track if the composer is already open
-    var isComposerOpen = false
-    
-    // State for Double Option detection
-    private var lastOptionPressTime: Date?
-    private var wasOptionPressedBefore = false
-    
-    // State for Both Options detection
-    private var leftOptionDown = false
-    private var rightOptionDown = false
-    
-    // Raw bits in NSEvent.modifierFlags for Left/Right Option keys
+/// The value copied from an `NSEvent` before it crosses onto the main actor.
+///
+/// Keeping this independent of AppKit makes the recognition rules deterministic
+/// and straightforward to unit test once the project has a test target.
+struct ShortcutInput: Sendable {
+    enum Kind: Sendable {
+        case flagsChanged
+        case keyDown
+    }
+
+    let kind: Kind
+    let timestamp: TimeInterval
+    let modifierFlags: UInt
+
+    nonisolated init(kind: Kind, timestamp: TimeInterval, modifierFlags: UInt) {
+        self.kind = kind
+        self.timestamp = timestamp
+        self.modifierFlags = modifierFlags
+    }
+
+    nonisolated init(event: NSEvent) {
+        self.init(
+            kind: event.type == .flagsChanged ? .flagsChanged : .keyDown,
+            timestamp: event.timestamp,
+            modifierFlags: event.modifierFlags.rawValue
+        )
+    }
+}
+
+/// Pure state machine for the modifier-only shortcuts.
+///
+/// `NSEvent` global monitors are asynchronous, so no presentation or AppKit
+/// window state belongs here. It only decides whether one input transition is a
+/// complete shortcut activation.
+struct ShortcutRecognizer {
+    private static let doubleOptionInterval: TimeInterval = 0.3
+
+    // Device-dependent modifier bits from IOKit's NX_DEVICELALTKEYMASK and
+    // NX_DEVICERALTKEYMASK. NSEvent retains these bits on flags-changed events,
+    // unlike `.option`, which intentionally combines both sides.
     private static let leftOptionMask: UInt = 0x000020
     private static let rightOptionMask: UInt = 0x000040
-    
-    private init() {
-        // Event monitoring is started manually after app launch (e.g. in .task or finished launching)
+
+    private var mode: ShortcutActivationMode?
+    private var lastOptionPressTimestamp: TimeInterval?
+    private var optionWasDown = false
+    private var bothOptionsWereDown = false
+
+    mutating func reset() {
+        lastOptionPressTimestamp = nil
+        optionWasDown = false
+        bothOptionsWereDown = false
+        mode = nil
     }
-    
-    func startMonitoring() {
-        stopMonitoring()
-        
-        // Register local monitor (works when the app is active)
+
+    mutating func consume(_ input: ShortcutInput, mode requestedMode: ShortcutActivationMode) -> Bool {
+        if mode != requestedMode {
+            reset()
+            mode = requestedMode
+        }
+
+        guard requestedMode != .disabled else {
+            return false
+        }
+
+        let flags = NSEvent.ModifierFlags(rawValue: input.modifierFlags)
+        let optionIsDown = flags.contains(.option)
+        let bothOptionsAreDown = hasBothOptions(input.modifierFlags)
+
+        // A non-modifier key must never turn an Option-key chord into a double
+        // press. Preserve the current down state so a later flags-changed event
+        // while the key remains held cannot look like a new press.
+        guard input.kind == .flagsChanged else {
+            lastOptionPressTimestamp = nil
+            optionWasDown = optionIsDown
+            bothOptionsWereDown = bothOptionsAreDown
+            return false
+        }
+
+        // Command, Control, Shift, and Fn turn either option gesture into a
+        // normal modifier chord. We require both Option keys to be released
+        // before a new both-options gesture can fire.
+        if containsInterruptingModifier(flags) {
+            lastOptionPressTimestamp = nil
+            optionWasDown = optionIsDown
+            bothOptionsWereDown = bothOptionsAreDown
+            return false
+        }
+
+        switch requestedMode {
+        case .doubleOption:
+            return consumeDoubleOption(
+                timestamp: input.timestamp,
+                optionIsDown: optionIsDown,
+                bothOptionsAreDown: bothOptionsAreDown
+            )
+
+        case .bothOptions:
+            let shouldTrigger = bothOptionsAreDown && !bothOptionsWereDown
+            bothOptionsWereDown = bothOptionsAreDown
+            lastOptionPressTimestamp = nil
+            optionWasDown = optionIsDown
+            return shouldTrigger
+
+        case .disabled:
+            return false
+        }
+    }
+
+    private mutating func consumeDoubleOption(
+        timestamp: TimeInterval,
+        optionIsDown: Bool,
+        bothOptionsAreDown: Bool
+    ) -> Bool {
+        defer {
+            bothOptionsWereDown = bothOptionsAreDown
+        }
+
+        guard optionIsDown else {
+            optionWasDown = false
+            return false
+        }
+
+        // A flags-changed event can be generated by the other Option key while
+        // one side is already held. That is not a second press.
+        guard !optionWasDown else {
+            return false
+        }
+
+        optionWasDown = true
+
+        guard let firstPressTimestamp = lastOptionPressTimestamp else {
+            lastOptionPressTimestamp = timestamp
+            return false
+        }
+
+        let interval = timestamp - firstPressTimestamp
+        guard interval >= 0, interval <= Self.doubleOptionInterval else {
+            lastOptionPressTimestamp = timestamp
+            return false
+        }
+
+        // Keep `optionWasDown` true until a release is seen. This prevents an
+        // extra flags-changed event for the same physical press from toggling
+        // the composer twice.
+        lastOptionPressTimestamp = nil
+        return true
+    }
+
+    private func hasBothOptions(_ rawFlags: UInt) -> Bool {
+        (rawFlags & Self.leftOptionMask) != 0 &&
+            (rawFlags & Self.rightOptionMask) != 0
+    }
+
+    private func containsInterruptingModifier(_ flags: NSEvent.ModifierFlags) -> Bool {
+        !flags.intersection([.command, .control, .shift, .function]).isEmpty
+    }
+}
+
+@MainActor
+final class ShortcutManager {
+    static let shared = ShortcutManager()
+
+    private var localMonitor: Any?
+    private var globalMonitor: Any?
+    private var recognizer = ShortcutRecognizer()
+    private var onToggle: (@MainActor () -> Void)?
+
+    private init() {
+        // Monitoring starts after launch so AppKit has an active run loop.
+    }
+
+    func startMonitoring(onToggle: @escaping @MainActor () -> Void) {
+        self.onToggle = onToggle
+
+        // A WindowGroup can be recreated. Do not tear down and reinstall global
+        // monitors on each appearance, which could lose the first half of a
+        // double-Option sequence or leave duplicate observers behind.
+        guard localMonitor == nil, globalMonitor == nil else { return }
+
+        recognizer.reset()
+
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
-            if event.type == .keyDown {
-                self?.handleKeyDown(event)
-            } else if event.type == .flagsChanged {
-                self?.handleFlagsChanged(event)
-            }
+            self?.enqueue(event)
             return event
         }
-        
-        // Register global monitor (works when the app is in background, if Accessibility permission is granted)
+
+        // This is deliberately separate from presentation. AppKit delivers
+        // copies of events for every other application, including one in a
+        // full-screen Space, when Accessibility access is granted.
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { [weak self] event in
-            if event.type == .keyDown {
-                self?.handleKeyDown(event)
-            } else if event.type == .flagsChanged {
-                self?.handleFlagsChanged(event)
-            }
+            self?.enqueue(event)
         }
     }
-    
+
     func stopMonitoring() {
-        if let local = localMonitor {
-            NSEvent.removeMonitor(local)
-            localMonitor = nil
+        if let localMonitor {
+            NSEvent.removeMonitor(localMonitor)
+            self.localMonitor = nil
         }
-        if let global = globalMonitor {
-            NSEvent.removeMonitor(global)
-            globalMonitor = nil
+        if let globalMonitor {
+            NSEvent.removeMonitor(globalMonitor)
+            self.globalMonitor = nil
         }
+
+        onToggle = nil
+        recognizer.reset()
     }
-    
-    private func handleKeyDown(_ event: NSEvent) {
-        // Any physical key down event resets the double press timer.
-        // This prevents Option-modifier combos (like cursor navigation or text deletion) from triggering the hotkey.
-        lastOptionPressTime = nil
-    }
-    
-    private func handleFlagsChanged(_ event: NSEvent) {
-        let mode = activationMode
-        guard mode != .disabled else { return }
-        
-        let flags = event.modifierFlags
-        
-        // Differentiate Left vs Right Option using the device-dependent raw flags
-        let isLeftPressed = (flags.rawValue & Self.leftOptionMask) != 0
-        let isRightPressed = (flags.rawValue & Self.rightOptionMask) != 0
-        
-        switch mode {
-        case .bothOptions:
-            // Trigger when both Option keys are held down simultaneously
-            if isLeftPressed && isRightPressed {
-                // To avoid multiple triggers while held, we only fire when this state transitions to both-down
-                if !(leftOptionDown && rightOptionDown) {
-                    leftOptionDown = true
-                    rightOptionDown = true
-                    triggerToggle()
-                }
-            } else {
-                leftOptionDown = isLeftPressed
-                rightOptionDown = isRightPressed
-            }
-            
-        case .doubleOption:
-            // Double press Option: triggers when EITHER option key is pressed twice within 0.3 seconds.
-            let isOptionPressed = flags.contains(.option)
-            
-            // Check if other modifier keys (Command, Shift, Control) are active
-            let otherModifiers = flags.intersection([.command, .control, .shift])
-            if !otherModifiers.isEmpty {
-                // Reset double tap state if other modifiers are pressed
-                lastOptionPressTime = nil
-                wasOptionPressedBefore = isOptionPressed
-                return
-            }
-            
-            if isOptionPressed {
-                if !wasOptionPressedBefore {
-                    wasOptionPressedBefore = true
-                    let now = Date()
-                    if let lastPress = lastOptionPressTime, now.timeIntervalSince(lastPress) < 0.3 {
-                        triggerToggle()
-                        lastOptionPressTime = nil // Reset so a third press doesn't double-trigger
-                    } else {
-                        lastOptionPressTime = now
-                    }
-                }
-            } else {
-                wasOptionPressedBefore = false
-            }
-            
-        case .disabled:
-            break
+
+    private nonisolated func enqueue(_ event: NSEvent) {
+        let input = ShortcutInput(event: event)
+
+        // Global monitors deliver asynchronously. Copy the event first, then
+        // serialize all state mutation and notification delivery on the main
+        // actor so rapid flags changes cannot race the panel lifecycle.
+        Task { @MainActor [weak self, input] in
+            self?.consume(input)
         }
     }
-    
-    private func triggerToggle() {
-        DispatchQueue.main.async {
-            NotificationCenter.default.post(name: .toggleCaptureMode, object: nil)
-        }
+
+    private func consume(_ input: ShortcutInput) {
+        guard recognizer.consume(input, mode: activationMode) else { return }
+
+        // We are already on the main actor. Calling synchronously preserves the
+        // user's physical toggle order and avoids a queue of stale toggles after
+        // rapid Option presses.
+        onToggle?()
     }
-    
+
     // MARK: - Accessibility Permissions
-    
-    static var isAccessibilityTrusted: Bool {
-        return AXIsProcessTrusted()
+
+    nonisolated static var isAccessibilityTrusted: Bool {
+        AXIsProcessTrusted()
     }
-    
-    static func requestAccessibilityPermission() {
+
+    nonisolated static func requestAccessibilityPermission() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         AXIsProcessTrustedWithOptions(options)
-        
-        // Open the System Settings Privacy -> Accessibility pane directly
+
+        // Open the System Settings Privacy -> Accessibility pane directly.
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
         }
     }
-    
+
     private var activationMode: ShortcutActivationMode {
         let raw = UserDefaults.standard.string(forKey: "shortcutActivationMode") ?? ShortcutActivationMode.doubleOption.rawValue
         return ShortcutActivationMode(rawValue: raw) ?? .doubleOption

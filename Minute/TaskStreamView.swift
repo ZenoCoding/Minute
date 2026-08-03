@@ -124,7 +124,8 @@ struct TaskStreamView: View {
             InlineTaskComposer(
                 activeProjects: activeProjects,
                 taskHistory: allTasks,
-                capacitySummaryForDate: capacitySummaryForDate
+                capacitySummaryForDate: capacitySummaryForDate,
+                onEditCreatedTask: { editingTask = $0 }
             )
                 .padding(.horizontal)
                 .padding(.top)
@@ -204,6 +205,7 @@ struct TaskStreamView: View {
 
                                 if section.title == "Today",
                                    dayCapacitySnapshot.overloadSeconds == 0,
+                                   dayCapacitySnapshot.unknownTaskCount == 0,
                                    dayCapacitySnapshot.spareSeconds >= minimumPullForwardSpareSeconds {
                                     HStack(spacing: 8) {
                                         Label("Free \(formatHours(dayCapacitySnapshot.spareSeconds))", systemImage: "sparkles")
@@ -224,6 +226,16 @@ struct TaskStreamView: View {
                                                 .foregroundStyle(.secondary)
                                         }
                                     }
+                                    .padding(.horizontal, 4)
+                                }
+
+                                if section.title == "Today", dayCapacitySnapshot.unknownTaskCount > 0 {
+                                    Label(
+                                        "Estimate \(dayCapacitySnapshot.unknownTaskCount) task\(dayCapacitySnapshot.unknownTaskCount == 1 ? "" : "s") before treating free time as available.",
+                                        systemImage: "hourglass.badge.questionmark"
+                                    )
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                                     .padding(.horizontal, 4)
                                 }
 
@@ -619,8 +631,12 @@ struct TaskStreamView: View {
             }
         }()
 
+        let unknownSuffix = snapshot.unknownTaskCount > 0
+            ? " · \(snapshot.unknownTaskCount) unestimated"
+            : ""
+
         return CapacitySummaryStyle(
-            text: "\(formatHours(snapshot.requiredSecondsToday)) / \(formatHours(snapshot.availableSecondsToday))",
+            text: "\(formatHours(snapshot.requiredSecondsToday)) / \(formatHours(snapshot.availableSecondsToday))\(unknownSuffix)",
             foregroundStyle: colors.foreground,
             backgroundStyle: colors.background,
             isOverloaded: snapshot.status == .overloaded
@@ -695,6 +711,7 @@ struct InlineTaskComposer: View {
     let activeProjects: [Project]
     let taskHistory: [TaskItem]
     let capacitySummaryForDate: (Date) -> (text: String, isOverloaded: Bool)?
+    let onEditCreatedTask: (TaskItem) -> Void
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject var calendarManager: CalendarManager
     
@@ -719,6 +736,11 @@ struct InlineTaskComposer: View {
     @State private var selectedDate: Date?
     @State private var selectedDuration: TimeInterval?
     @State private var parseTask: Task<Void, Never>?
+    @State private var inferenceTask: Task<Void, Never>?
+    @State private var isInferringProject = false
+    @State private var lastCreatedTask: TaskItem?
+    @State private var feedbackTask: Task<Void, Never>?
+    @AppStorage(CodexProjectInferenceSettings.enabledKey) private var experimentalCodexInferenceEnabled = false
     
     // Effective Values
     var effectiveProject: Project? {
@@ -775,6 +797,9 @@ struct InlineTaskComposer: View {
                     }
                     .onChange(of: text) { _, newValue in
                         parseTask?.cancel()
+                        inferenceTask?.cancel()
+                        inferenceTask = nil
+                        isInferringProject = false
                         if newValue.isEmpty {
                             resetComposer(keepText: true)
                         } else {
@@ -792,19 +817,34 @@ struct InlineTaskComposer: View {
 
                                 await MainActor.run {
                                     guard text == inputSnapshot else { return }
-                                    detectedProject = result.projectName.flatMap { matchedName in
+                                    let locallyDetectedProject = result.projectName.flatMap { matchedName in
                                         activeProjects.first {
                                             $0.name.caseInsensitiveCompare(matchedName) == .orderedSame
                                         }
+                                    }
+                                    if let locallyDetectedProject {
+                                        detectedProject = locallyDetectedProject
                                     }
                                     detectedDuration = result.duration
                                     detectedDate = result.date
                                     detectedRecurrence = result.recurrenceInterval
                                     detectedIsEvent = result.isEvent
+
+                                    if locallyDetectedProject == nil, !result.isEvent {
+                                        scheduleLiveProjectInference(
+                                            text: inputSnapshot,
+                                            candidates: candidateSnapshot
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
+
+                if isInferringProject {
+                    ProjectInferenceSpinner()
+                        .transition(.scale.combined(with: .opacity))
+                }
             }
             .padding(10)
             
@@ -881,6 +921,7 @@ struct InlineTaskComposer: View {
                                         ForEach(activeProjects) { project in
                                             Button {
                                                 selectedProject = project
+                                                ProjectInferenceMemory.record(text: text, projectName: project.name)
                                                 showProjectPicker = false
                                             } label: {
                                                 HStack {
@@ -1120,12 +1161,48 @@ struct InlineTaskComposer: View {
                 .padding(.top, 4)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
+
+            if let lastCreatedTask {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text("Added to \(lastCreatedTask.project?.name ?? "Inbox")")
+                        .font(.caption)
+                        .lineLimit(1)
+                    Spacer()
+                    Button("Edit") {
+                        feedbackTask?.cancel()
+                        self.lastCreatedTask = nil
+                        onEditCreatedTask(lastCreatedTask)
+                    }
+                    .buttonStyle(.link)
+                    Button("Undo") {
+                        feedbackTask?.cancel()
+                        modelContext.delete(lastCreatedTask)
+                        try? modelContext.save()
+                        self.lastCreatedTask = nil
+                    }
+                    .buttonStyle(.link)
+                }
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
         }
         .padding(.horizontal, 4)
         .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            if isInferringProject {
+                ProjectInferenceGlow(cornerRadius: 12)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: isInferringProject)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: text.isEmpty)
         .onDisappear {
             parseTask?.cancel()
+            inferenceTask?.cancel()
+            feedbackTask?.cancel()
         }
     }
     
@@ -1180,23 +1257,130 @@ struct InlineTaskComposer: View {
                 $0.name.caseInsensitiveCompare(matchedName) == .orderedSame
             }
         }
+
+        let resolvedProject = selectedProject ?? detectedProject ?? parsedProject
+        if let selectedProject {
+            ProjectInferenceMemory.record(text: trimmed, projectName: selectedProject.name)
+        }
+
+        let createdTask = finishTask(
+            title: finalTitle,
+            project: resolvedProject,
+            duration: selectedDuration ?? result.duration,
+            date: selectedDate ?? result.date,
+            recurrence: selectedRecurrence ?? result.recurrenceInterval
+        )
+
+        if let createdTask,
+           experimentalCodexInferenceEnabled,
+           resolvedProject == nil,
+           !projectCandidates.isEmpty {
+            improveProjectAfterCapture(
+                task: createdTask,
+                text: trimmed,
+                candidates: projectCandidates
+            )
+        }
+    }
+
+    private func scheduleLiveProjectInference(
+        text input: String,
+        candidates: [SmartInputParser.ProjectCandidate]
+    ) {
+        guard experimentalCodexInferenceEnabled, !candidates.isEmpty else { return }
+        inferenceTask?.cancel()
+
+        inferenceTask = Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard text == input, selectedProject == nil else { return }
+                isInferringProject = true
+            }
+            let inferredName = try? await CodexProjectInferenceService.inferProjectName(
+                text: input,
+                candidates: candidates
+            )
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                guard text == input, selectedProject == nil else { return }
+                isInferringProject = false
+                inferenceTask = nil
+                let inferredProject = inferredName.flatMap { name in
+                    activeProjects.first {
+                        $0.name.caseInsensitiveCompare(name) == .orderedSame
+                    }
+                }
+                if let inferredProject {
+                    detectedProject = inferredProject
+                }
+            }
+        }
+    }
+
+    private func improveProjectAfterCapture(
+        task: TaskItem,
+        text: String,
+        candidates: [SmartInputParser.ProjectCandidate]
+    ) {
+        Task {
+            let inferredName = try? await CodexProjectInferenceService.inferProjectName(
+                text: text,
+                candidates: candidates
+            )
+            guard let inferredName,
+                  let project = activeProjects.first(where: {
+                      $0.name.caseInsensitiveCompare(inferredName) == .orderedSame
+                  }) else { return }
+
+            await MainActor.run {
+                guard task.modelContext != nil else { return }
+                task.project = project
+                try? modelContext.save()
+            }
+        }
+    }
+
+    @discardableResult
+    private func finishTask(
+        title: String,
+        project: Project?,
+        duration: TimeInterval?,
+        date: Date?,
+        recurrence: String?
+    ) -> TaskItem? {
         let service = MinuteDataService(modelContext: modelContext)
+        let task: TaskItem
         do {
-            _ = try service.createTask(
-                title: finalTitle,
-                project: selectedProject ?? parsedProject,
-                estimatedDuration: selectedDuration ?? result.duration,
-                dueDate: selectedDate ?? result.date,
-                recurrenceInterval: selectedRecurrence ?? result.recurrenceInterval
+            task = try service.createTask(
+                title: title,
+                project: project,
+                estimatedDuration: duration,
+                dueDate: date,
+                recurrenceInterval: recurrence
             )
             try service.save()
         } catch {
             print("Failed to create task: \(error)")
-            return
+            return nil
+        }
+
+        feedbackTask?.cancel()
+        withAnimation(.snappy) {
+            lastCreatedTask = task
+        }
+        feedbackTask = Task {
+            try? await Task.sleep(for: .seconds(6))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.snappy) { lastCreatedTask = nil }
+            }
         }
         
         // Reset
         resetComposer()
+        return task
     }
     
     private func resetComposer(keepText: Bool = false) {
@@ -1435,82 +1619,75 @@ struct TaskStreamRow: View {
                             projects: activeProjects,
                             selection: .constant(item.task.project)
                         ) { project in
+                            ProjectInferenceMemory.record(text: item.task.title, projectName: project.name)
                             item.task.project = project
                             showProjectPicker = false
                         }
                     }
                     
                     // Duration Badge (Editable)
-                    EditableBadge(showPopover: $showDurationPicker) {
-                        HStack(spacing: 2) {
-                            Image(systemName: "hourglass")
-                            if let duration = item.task.estimatedDuration {
+                    if let duration = item.task.estimatedDuration {
+                        EditableBadge(showPopover: $showDurationPicker) {
+                            HStack(spacing: 2) {
+                                Image(systemName: "hourglass")
                                 Text(formatDuration(duration))
-                            } else {
-                                Text("—")
-                                    .foregroundStyle(.tertiary)
                             }
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        } popover: {
+                            DurationPickerPopover(
+                                selection: Binding(
+                                    get: { item.task.estimatedDuration },
+                                    set: { item.task.estimatedDuration = $0 }
+                                ),
+                                isPresented: $showDurationPicker
+                            )
                         }
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .opacity(item.task.estimatedDuration != nil ? 1.0 : 0.5)
-                    } popover: {
-                        DurationPickerPopover(
-                            selection: Binding(
-                                get: { item.task.estimatedDuration },
-                                set: { item.task.estimatedDuration = $0 }
-                            ),
-                            isPresented: $showDurationPicker
-                        )
                     }
                     
                     // Date Badge (Editable)
-                    EditableBadge(showPopover: $showDatePicker) {
-                        HStack(spacing: 2) {
-                            Image(systemName: "calendar")
-                            if let date = item.task.dueDate {
+                    if let date = item.task.dueDate {
+                        EditableBadge(showPopover: $showDatePicker) {
+                            HStack(spacing: 2) {
+                                Image(systemName: "calendar")
                                 Text(formatDate(date))
                                     .foregroundStyle(isOverdue(date) ? .red : .secondary)
-                            } else {
-                                Text("—")
-                                    .foregroundStyle(.tertiary)
                             }
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        } popover: {
+                            DatePickerPopover(
+                                selection: Binding(
+                                    get: { item.task.dueDate },
+                                    set: { item.task.dueDate = $0 }
+                                ),
+                                isPresented: $showDatePicker
+                            )
                         }
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .opacity(item.task.dueDate != nil ? 1.0 : 0.5)
-                    } popover: {
-                        DatePickerPopover(
-                            selection: Binding(
-                                get: { item.task.dueDate },
-                                set: { item.task.dueDate = $0 }
-                            ),
-                            isPresented: $showDatePicker
-                        )
                     }
                     
                     // Recurrence Badge (Editable)
-                    EditableBadge(showPopover: $showRecurrencePicker) {
-                        HStack(spacing: 2) {
-                            Image(systemName: "repeat")
-                            if item.task.isRecurring, let interval = item.task.recurrenceInterval {
+                    if item.task.isRecurring, let interval = item.task.recurrenceInterval {
+                        EditableBadge(showPopover: $showRecurrencePicker) {
+                            HStack(spacing: 2) {
+                                Image(systemName: "repeat")
                                 Text(interval.capitalized)
                             }
+                            .font(.caption2)
+                            .foregroundStyle(.blue)
+                        } popover: {
+                            RecurrencePickerPopover(
+                                isRecurring: Binding(
+                                    get: { item.task.isRecurring },
+                                    set: { item.task.isRecurring = $0 }
+                                ),
+                                recurrenceInterval: Binding(
+                                    get: { item.task.recurrenceInterval },
+                                    set: { item.task.recurrenceInterval = $0 }
+                                ),
+                                isPresented: $showRecurrencePicker
+                            )
                         }
-                        .font(.caption2)
-                        .foregroundStyle(item.task.isRecurring ? AnyShapeStyle(.blue) : AnyShapeStyle(.tertiary))
-                    } popover: {
-                        RecurrencePickerPopover(
-                            isRecurring: Binding(
-                                get: { item.task.isRecurring },
-                                set: { item.task.isRecurring = $0 }
-                            ),
-                            recurrenceInterval: Binding(
-                                get: { item.task.recurrenceInterval },
-                                set: { item.task.recurrenceInterval = $0 }
-                            ),
-                            isPresented: $showRecurrencePicker
-                        )
                     }
                 }
             }
