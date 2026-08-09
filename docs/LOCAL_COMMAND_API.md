@@ -7,6 +7,25 @@ The API currently supports every persisted Minute entity:
 - `Area`
 - `Project`
 - `TaskItem`
+- `TaskSuggestion` (reviewable candidates; importing never creates tasks)
+
+## Task suggestions
+
+Import a daily, source-backed JSON batch without creating any real tasks:
+
+```bash
+minute suggestions import /tmp/minute-suggestions.json
+minute list suggestions --status pending
+minute suggestions accept <suggestion-uuid-or-fingerprint>
+minute suggestions dismiss <suggestion-uuid-or-fingerprint>
+```
+
+Each candidate requires `fingerprint`, `title`, and `sourceType`. Supported
+source types are `gmail`, `calendar`, `drive`, and `idea`; optional fields are
+`sourceLabel`, `sourceURL`, `evidenceSnippet`, `reason`, `project`, `dueDate`,
+`confidence`, and `rank`. Fingerprints are stable deduplication keys. Accepted
+and dismissed candidates are terminal and will not be resurrected by a later
+import with the same fingerprint.
 
 Each entity can be created, listed, retrieved, updated, and deleted.
 
@@ -63,6 +82,9 @@ minute task "Submit research abstract" \
   --due "2026-06-08T17:00:00-07:00" \
   --duration 45m \
   --recurrence weekly \
+  --notes "Include the latest methods paragraph." \
+  --checklist-item "Update methods" \
+  --checklist-item "Run the citation check" \
   --no-parse \
   --json
 ```
@@ -82,7 +104,12 @@ Update data:
 minute update area "School" --name "Academics" --color 007AFF --json
 minute update project "COSMOS" --status backlog --weekly-goal 3h --json
 minute update task TASK_UUID --title "Submit final abstract" --completed --json
-minute update task TASK_UUID --clear-due --clear-duration --json
+minute update task TASK_UUID \
+  --notes "Send the final PDF to the advisor." \
+  --checklist-item "Export PDF" \
+  --checklist-item "Send email" \
+  --json
+minute update task TASK_UUID --clear-due --clear-duration --clear-notes --json
 ```
 
 Delete data:
@@ -139,7 +166,7 @@ Minute processes them through `MinuteDataService`, saves SwiftData, and writes r
 ~/Library/Containers/com.tychoyoung.Minute/Data/Library/Application Support/Minute/Commands/receipts/
 ```
 
-The CLI launches `com.tychoyoung.Minute` when necessary and waits for the receipt.
+The CLI launches `com.tychoyoung.Minute` in the background when necessary and waits for the receipt.
 
 Supported action values are `create`, `list`, `get`, `update`, `delete`, and `ping`.
 
@@ -157,6 +184,11 @@ Supported action values are `create`, `list`, `get`, `update`, `delete`, and `pi
     "dueDate": "2026-06-08T17:00:00-07:00",
     "durationSeconds": 2700,
     "recurrence": "weekly",
+    "notes": "Include the latest methods paragraph.",
+    "checklist": [
+      {"title": "Update methods", "isCompleted": true},
+      {"title": "Run the citation check", "isCompleted": false}
+    ],
     "parseNaturalLanguage": false,
     "orderIndex": 0
   }
@@ -172,6 +204,9 @@ Task fields:
 | `dueDate` | no | ISO-8601 date and time |
 | `durationSeconds` | no | Estimated duration |
 | `recurrence` | no | `daily` or `weekly` |
+| `notes` | no | Optional plain-text task notes |
+| `clearNotes` | no | Update-only flag that clears notes |
+| `checklist` | no | Update replaces the ordered shallow checklist; each item has `title` and optional `isCompleted` (default `false`) |
 | `parseNaturalLanguage` | no | Defaults to `true` |
 | `orderIndex` | no | Explicit task ordering value |
 
@@ -232,6 +267,18 @@ Project status may be `active`, `backlog`, `completed`, or `archived`. The named
       "project": "COSMOS",
       "area": "School",
       "isCompleted": false,
+      "notes": "Include the latest methods paragraph.",
+      "workStartedAt": null,
+      "checklist": [
+        {
+          "id": "6D5C4A31-68B1-4FCB-9FB7-1D22E0B7BB4F",
+          "title": "Update methods",
+          "isCompleted": true,
+          "completedAt": "2026-06-07T00:00:00Z",
+          "orderIndex": 0,
+          "createdAt": "2026-06-06T00:00:00Z"
+        }
+      ],
       "estimatedDuration": 2700,
       "dueDate": "2026-06-09T00:00:00Z"
     }
@@ -240,6 +287,8 @@ Project status may be `active`, `backlog`, `completed`, or `archived`. The named
 ```
 
 `list` returns every matching snapshot in `items`; `get`, `create`, `update`, and `delete` return one snapshot. Error receipts use `"status": "error"` and put the failure reason in `message`.
+
+Task snapshots include optional `notes` and `workStartedAt` values plus an ordered `checklist` snapshot. Raw requests can send `isCompleted` values for exact checklist state; the CLI's repeatable `--checklist-item` flags create unchecked items. Completing a task completes its checklist and stops work; completing the final checklist item completes the task, while unchecking any item reopens it.
 
 ## Selection and Safety
 

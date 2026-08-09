@@ -5,6 +5,7 @@
 //  Full-screen quick capture mode for rapid task brain dump.
 //
 
+import AppKit
 import SwiftUI
 import SwiftData
 
@@ -31,10 +32,12 @@ struct FullScreenCaptureView: View {
     @State private var detectedDate: Date?
     @State private var detectedRecurrence: String?
     @State private var detectedIsEvent = false
+    @State private var detectedMetadataSpans: [SmartInputParser.ComposerMetadataSpan] = []
     
     // Manual overrides
     @State private var selectedProject: Project?
     @State private var selectedDate: Date?
+    @State private var hasSelectedDateOverride = false
     @State private var selectedDuration: TimeInterval?
     @State private var selectedRecurrence: String?
     @State private var parseTask: Task<Void, Never>?
@@ -52,6 +55,10 @@ struct FullScreenCaptureView: View {
     @State private var launchingTask: TaskItem?
     @State private var launchAnimationTask: Task<Void, Never>?
     @State private var editingTask: TaskItem?
+    @State private var editingSuggestion: TaskSuggestion?
+    @State private var dateScrollAccumulator = ComposerDateScrollAccumulator()
+    @State private var isDateScrubbing = false
+    @State private var dateScrubSettleTask: Task<Void, Never>?
     
     @FocusState private var isInputFocused: Bool
     @Namespace private var taskGlassNamespace
@@ -71,7 +78,7 @@ struct FullScreenCaptureView: View {
     }
     
     var effectiveDate: Date? {
-        selectedDate ?? detectedDate
+        hasSelectedDateOverride ? selectedDate : detectedDate
     }
 
     var effectiveIsEvent: Bool {
@@ -136,6 +143,10 @@ struct FullScreenCaptureView: View {
     var body: some View {
         GlassEffectContainer(spacing: 0) {
             VStack(spacing: 18) {
+                if text.isEmpty {
+                    TaskSuggestionStrip(mode: .wide, onEdit: editSuggestion)
+                        .frame(maxWidth: 720)
+                }
                 composerBlock
 
                 if !topTasks.isEmpty {
@@ -162,6 +173,7 @@ struct FullScreenCaptureView: View {
             parseTask?.cancel()
             inferenceTask?.cancel()
             launchAnimationTask?.cancel()
+            dateScrubSettleTask?.cancel()
             isInputFocused = false
             onAuxiliaryPresentationChanged(false)
         }
@@ -232,6 +244,7 @@ struct FullScreenCaptureView: View {
                                     detectedDate = result.date
                                     detectedRecurrence = result.recurrenceInterval
                                     detectedIsEvent = result.isEvent
+                                    detectedMetadataSpans = result.metadataSpans
 
                                     if locallyDetectedProject == nil, !result.isEvent {
                                         scheduleLiveProjectInference(
@@ -277,6 +290,13 @@ struct FullScreenCaptureView: View {
                     .transition(.opacity)
             }
         }
+        .background {
+            ComposerScrollWheelObserver(
+                isEnabled: !text.isEmpty && !isPresentingAuxiliaryUI,
+                onScroll: handleComposerDateScroll,
+                onGestureEnded: endComposerDateScrollGesture
+            )
+        }
         .animation(.easeInOut(duration: 0.2), value: isInferringProject)
         .animation(
             .spring(response: 0.38, dampingFraction: 0.86),
@@ -294,101 +314,22 @@ struct FullScreenCaptureView: View {
     
     var metadataBar: some View {
         HStack(spacing: 12) {
-            if effectiveIsEvent {
-                HStack(spacing: 6) {
-                    Image(systemName: "calendar.badge.plus")
-                    Text("Event")
-                }
-                .font(.caption)
-                .foregroundStyle(.blue)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .glassEffect(.clear.interactive(), in: Capsule())
-                .overlay {
-                    Capsule().stroke(.primary.opacity(0.18), lineWidth: 1)
-                }
-            } else {
-                // Project
-                Button { showProjectPicker = true } label: {
-                    HStack(spacing: 6) {
-                        if let icon = effectiveProject?.area?.iconName {
-                            Image(systemName: icon)
-                        } else if effectiveProject != nil {
-                            Image(systemName: "folder")
-                        } else {
-                            Image(systemName: "tray")
-                        }
-                        if let project = effectiveProject {
-                            Text(project.name)
-                        } else {
-                            Text("Inbox")
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(effectiveProject == nil ? .secondary : .primary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .glassEffect(.clear.interactive(), in: Capsule())
-                    .overlay {
-                        Capsule().stroke(.primary.opacity(0.18), lineWidth: 1)
-                    }
-                }
-                .buttonStyle(.plain)
-                .popover(isPresented: $showProjectPicker, arrowEdge: .bottom) {
-                    projectPicker
-                }
+            ComposerMetadataMorphing(
+                rawText: text,
+                values: composerMetadataValues,
+                recognizedSpans: composerMetadataSpans,
+                highlightedKind: isDateScrubbing ? .dueDate : nil,
+                onSelect: handleMetadataChipSelection
+            )
+            .animation(.spring(response: 0.24, dampingFraction: 0.8), value: isDateScrubbing)
+            .popover(isPresented: $showProjectPicker, arrowEdge: .bottom) {
+                projectPicker
             }
-            
-            // Date
-            Button { showDatePicker = true } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "calendar")
-                    Text(effectiveDate.map { formatDate($0) } ?? "No date")
-                }
-                .font(.caption)
-                .foregroundStyle(effectiveDate.map { isToday($0) ? Color.green : Color.primary } ?? Color.primary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .glassEffect(.clear.interactive(), in: Capsule())
-                .overlay {
-                    Capsule().stroke(.primary.opacity(0.18), lineWidth: 1)
-                }
-            }
-            .buttonStyle(.plain)
             .popover(isPresented: $showDatePicker, arrowEdge: .bottom) {
                 datePicker
             }
-            
-            // Duration
-            if let duration = effectiveDuration {
-                HStack(spacing: 6) {
-                    Image(systemName: "hourglass")
-                    Text(formatDuration(duration))
-                }
-                .font(.caption)
-                .foregroundStyle(.blue)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .glassEffect(.clear.interactive(), in: Capsule())
-                .overlay {
-                    Capsule().stroke(.primary.opacity(0.18), lineWidth: 1)
-                }
-            }
-            
-            // Recurrence
-            if !effectiveIsEvent, let recurrence = effectiveRecurrence {
-                HStack(spacing: 6) {
-                    Image(systemName: "repeat")
-                    Text(recurrence.capitalized)
-                }
-                .font(.caption)
-                .foregroundStyle(.purple)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .glassEffect(.clear.interactive(), in: Capsule())
-                .overlay {
-                    Capsule().stroke(.primary.opacity(0.18), lineWidth: 1)
-                }
+            .popover(isPresented: $showDurationPicker, arrowEdge: .bottom) {
+                durationPicker
             }
             
             Button {
@@ -409,8 +350,6 @@ struct FullScreenCaptureView: View {
                 }
             }
             .buttonStyle(.plain)
-
-            Spacer()
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
@@ -567,13 +506,16 @@ struct FullScreenCaptureView: View {
     var datePicker: some View {
         VStack(spacing: 12) {
             HStack {
-                Button("Today") { selectedDate = DueDateSupport.presetToday(); showDatePicker = false }
+                Button("Today") {
+                    setSelectedDate(DueDateSupport.presetToday())
+                    showDatePicker = false
+                }
                 Button("Tomorrow") { 
-                    selectedDate = DueDateSupport.presetTomorrow()
+                    setSelectedDate(DueDateSupport.presetTomorrow())
                     showDatePicker = false 
                 }
                 Button("No Date") {
-                    selectedDate = nil
+                    setSelectedDate(nil)
                     showDatePicker = false
                 }
             }
@@ -581,7 +523,7 @@ struct FullScreenCaptureView: View {
             
             Divider()
             
-            CustomDatePicker(selection: $selectedDate)
+            CustomDatePicker(selection: selectedDateBinding)
         }
         .padding()
         .frame(width: 280)
@@ -802,6 +744,10 @@ struct FullScreenCaptureView: View {
                 recurrenceInterval: recurrence
             )
             try service.save()
+            if let editingSuggestion {
+                try TaskSuggestionService(modelContext: modelContext)
+                    .markAccepted(editingSuggestion, task: task)
+            }
         } catch {
             print("Failed to create task: \(error)")
             return nil
@@ -833,11 +779,25 @@ struct FullScreenCaptureView: View {
         detectedDate = nil
         detectedRecurrence = nil
         detectedIsEvent = false
+        detectedMetadataSpans = []
         selectedProject = nil
         selectedDate = nil
+        hasSelectedDateOverride = false
         selectedDuration = nil
         selectedRecurrence = nil
         showDetails = false
+        editingSuggestion = nil
+    }
+
+    private func editSuggestion(_ suggestion: TaskSuggestion) {
+        editingSuggestion = suggestion
+        selectedProject = suggestion.inferredProjectName.flatMap { name in
+            activeProjects.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        }
+        selectedDate = suggestion.dueDate
+        hasSelectedDateOverride = true
+        text = suggestion.title
+        isInputFocused = true
     }
     
     private func formatDate(_ date: Date) -> String {
@@ -849,6 +809,105 @@ struct FullScreenCaptureView: View {
     
     private func isToday(_ date: Date) -> Bool {
         Calendar.current.isDateInToday(date)
+    }
+
+    private var selectedDateBinding: Binding<Date?> {
+        Binding(
+            get: { effectiveDate },
+            set: { setSelectedDate($0) }
+        )
+    }
+
+    private var composerMetadataValues: ComposerMetadataMorphingValues {
+        ComposerMetadataMorphingValues(
+            projectName: effectiveIsEvent ? nil : effectiveProject?.name ?? "Inbox",
+            projectSystemImage: effectiveProject?.area?.iconName ?? (effectiveProject == nil ? "tray" : "folder"),
+            dueDate: effectiveDate,
+            dateLabel: effectiveDate.map(formatDate),
+            duration: effectiveDuration,
+            durationLabel: effectiveDuration.map(formatDuration),
+            recurrence: effectiveIsEvent ? nil : effectiveRecurrence,
+            isEvent: effectiveIsEvent,
+            includesDatePlaceholder: true
+        )
+    }
+
+    private var composerMetadataSpans: [SmartInputParser.ComposerMetadataSpan] {
+        detectedMetadataSpans.filter { span in
+            switch span.kind {
+            case .project:
+                return selectedProject == nil
+            case .dueDate:
+                return !hasSelectedDateOverride
+            case .duration:
+                return selectedDuration == nil
+            case .recurrence:
+                return selectedRecurrence == nil
+            case .event:
+                return true
+            }
+        }
+    }
+
+    private func handleMetadataChipSelection(_ kind: ComposerMetadataKind) {
+        switch kind {
+        case .project:
+            showProjectPicker = true
+        case .dueDate:
+            showDatePicker = true
+        case .duration:
+            showDurationPicker = true
+        case .recurrence, .event:
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                showDetails = true
+            }
+        }
+    }
+
+    private func setSelectedDate(_ date: Date?) {
+        selectedDate = date
+        hasSelectedDateOverride = true
+    }
+
+    private func handleComposerDateScroll(deltaY: CGFloat, isPrecise: Bool) {
+        let steps = dateScrollAccumulator.consume(delta: deltaY, isPrecise: isPrecise)
+        guard steps != 0 else { return }
+
+        let previousDate = effectiveDate
+        let nextDate = ComposerDraftDateStepper.date(afterApplying: steps, to: previousDate)
+        guard nextDate != previousDate else { return }
+
+        setSelectedDate(nextDate)
+        isDateScrubbing = true
+        scheduleDateScrubSettle()
+
+        let calendar = Calendar.current
+        let feedback: NSHapticFeedbackManager.FeedbackPattern
+        if let nextDate,
+           calendar.isDateInToday(nextDate) || calendar.component(.weekday, from: nextDate) == 2 {
+            feedback = .levelChange
+        } else {
+            feedback = .alignment
+        }
+        NSHapticFeedbackManager.defaultPerformer.perform(feedback, performanceTime: .now)
+    }
+
+    private func endComposerDateScrollGesture() {
+        dateScrollAccumulator.endGesture()
+        scheduleDateScrubSettle()
+    }
+
+    private func scheduleDateScrubSettle() {
+        dateScrubSettleTask?.cancel()
+        dateScrubSettleTask = Task {
+            try? await Task.sleep(for: .milliseconds(650))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    isDateScrubbing = false
+                }
+            }
+        }
     }
     
     private func formatDuration(_ seconds: TimeInterval) -> String {

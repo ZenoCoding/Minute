@@ -98,7 +98,7 @@ def add_delivery_options(parser):
 def add_entity_selector(parser):
     parser.add_argument(
         "entity",
-        choices=("area", "areas", "project", "projects", "task", "tasks"),
+        choices=("area", "areas", "project", "projects", "task", "tasks", "suggestion", "suggestions"),
     )
 
 
@@ -151,6 +151,14 @@ def build_parser():
         help="Estimated duration, such as 45m or 1h30m.",
     )
     task.add_argument("--recurrence", choices=("daily", "weekly"))
+    task.add_argument("--notes", help="Task notes.")
+    task.add_argument(
+        "--checklist-item",
+        action="append",
+        default=None,
+        metavar="TITLE",
+        help="Add a checklist item; repeat for multiple items.",
+    )
     task.add_argument("--order", type=int)
     task.add_argument(
         "--no-parse",
@@ -159,14 +167,30 @@ def build_parser():
     )
     add_delivery_options(task)
 
+    suggestions = subparsers.add_parser(
+        "suggestions",
+        help="Import, accept, or dismiss discovered task suggestions.",
+    )
+    suggestion_commands = suggestions.add_subparsers(dest="suggestion_command", required=True)
+    import_suggestions = suggestion_commands.add_parser(
+        "import",
+        help="Import a JSON array of suggestion candidates.",
+    )
+    import_suggestions.add_argument("file", help="JSON file containing an array or {suggestions: [...]}.")
+    add_delivery_options(import_suggestions)
+    for action in ("accept", "dismiss"):
+        command = suggestion_commands.add_parser(action, help=f"{action.capitalize()} one suggestion.")
+        command.add_argument("identifier", help="Suggestion UUID or stable fingerprint.")
+        add_delivery_options(command)
+
     list_command = subparsers.add_parser("list", help="List current Minute data.")
     add_entity_selector(list_command)
     list_command.add_argument("--area", help="Filter projects by area.")
     list_command.add_argument("--project", help="Filter tasks by project.")
     list_command.add_argument(
         "--status",
-        choices=("active", "backlog", "completed", "archived"),
-        help="Filter projects by status.",
+        choices=("active", "backlog", "completed", "archived", "pending", "accepted", "dismissed"),
+        help="Filter projects or suggestions by status.",
     )
     completion_filter = list_command.add_mutually_exclusive_group()
     completion_filter.add_argument("--completed", action="store_true")
@@ -200,6 +224,15 @@ def build_parser():
     update.add_argument("--clear-duration", action="store_true")
     update.add_argument("--recurrence", choices=("daily", "weekly"))
     update.add_argument("--clear-recurrence", action="store_true")
+    update.add_argument("--notes", help="Replace task notes.")
+    update.add_argument("--clear-notes", action="store_true")
+    update.add_argument(
+        "--checklist-item",
+        action="append",
+        default=None,
+        metavar="TITLE",
+        help="Replace the checklist with these items; repeat for multiple items.",
+    )
     completion_update = update.add_mutually_exclusive_group()
     completion_update.add_argument("--completed", action="store_true")
     completion_update.add_argument("--incomplete", action="store_true")
@@ -249,6 +282,28 @@ def make_request(args):
             "version": 1,
             "requestID": request_id,
             "action": "ping",
+        }
+
+    if args.command == "suggestions":
+        if args.suggestion_command == "import":
+            with open(args.file, encoding="utf-8") as handle:
+                document = json.load(handle)
+            suggestions = document.get("suggestions") if isinstance(document, dict) else document
+            if not isinstance(suggestions, list):
+                raise ValueError("suggestion import must contain a JSON array")
+            return {
+                "version": 1,
+                "requestID": request_id,
+                "action": "import",
+                "entity": "suggestion",
+                "payload": {"suggestions": suggestions},
+            }
+        return {
+            "version": 1,
+            "requestID": request_id,
+            "action": args.suggestion_command,
+            "entity": "suggestion",
+            "payload": {"identifier": args.identifier},
         }
 
     if args.command in ("list", "get", "update", "delete"):
@@ -301,6 +356,15 @@ def make_request(args):
                 payload["recurrence"] = args.recurrence
             if args.clear_recurrence:
                 payload["clearRecurrence"] = True
+            if args.notes is not None:
+                payload["notes"] = args.notes
+            if args.clear_notes:
+                payload["clearNotes"] = True
+            if args.checklist_item is not None:
+                payload["checklist"] = [
+                    {"title": title, "isCompleted": False}
+                    for title in args.checklist_item
+                ]
             if args.completed:
                 payload["completed"] = True
             elif args.incomplete:
@@ -354,6 +418,13 @@ def make_request(args):
             payload["durationSeconds"] = args.duration
         if args.recurrence:
             payload["recurrence"] = args.recurrence
+        if args.notes is not None:
+            payload["notes"] = args.notes
+        if args.checklist_item is not None:
+            payload["checklist"] = [
+                {"title": title, "isCompleted": False}
+                for title in args.checklist_item
+            ]
         if args.order is not None:
             payload["orderIndex"] = args.order
 
@@ -375,7 +446,7 @@ def launch_minute():
     for candidate in candidates:
         if candidate and pathlib.Path(candidate).exists():
             fallback = subprocess.run(
-                ["/usr/bin/open", candidate],
+                ["/usr/bin/open", "-g", candidate],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -384,7 +455,7 @@ def launch_minute():
                 return
 
     result = subprocess.run(
-        ["/usr/bin/open", "-b", BUNDLE_ID],
+        ["/usr/bin/open", "-g", "-b", BUNDLE_ID],
         capture_output=True,
         text=True,
         check=False,
@@ -439,6 +510,8 @@ def print_receipt(receipt, as_json):
             detail = f"{item.get('projectCount', 0)} projects"
         elif entity == "project":
             detail = f"{item.get('status', '')}, {item.get('area') or 'no area'}"
+        elif entity == "suggestion":
+            detail = f"{item.get('status', '')}, {item.get('sourceLabel') or item.get('sourceType') or 'Idea'}"
         else:
             marker = "done" if item.get("isCompleted") else "open"
             detail = f"{marker}, {item.get('project') or 'Inbox'}"

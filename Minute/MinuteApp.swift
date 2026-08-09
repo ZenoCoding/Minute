@@ -8,6 +8,15 @@ enum MinuteStoreLocation {
         fileManager: FileManager = .default,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> URL {
+        // An explicit absolute store path is reserved for migration and UI
+        // verification against disposable copies. Normal launches never set it
+        // and continue to use the canonical sandbox store below.
+        if let overridePath = environment["MINUTE_STORE_URL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           overridePath.hasPrefix("/") {
+            return URL(fileURLWithPath: overridePath, isDirectory: false)
+        }
+
         let defaultURL = fileManager
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("default.store")
@@ -38,16 +47,28 @@ struct MinuteApp: App {
     let sharedModelContainer: ModelContainer
 
     init() {
-        let schema = Schema([
-            Area.self, Project.self, TaskItem.self
-        ])
-        let isRunningTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-        let modelConfiguration = isRunningTests
-            ? ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
-            : ModelConfiguration(schema: schema, url: MinuteStoreLocation.resolvedURL())
+        let environment = ProcessInfo.processInfo.environment
+        let isRunningTests = environment["XCTestConfigurationFilePath"] != nil
+        let isSandboxed = environment["APP_SANDBOX_CONTAINER_ID"] != nil
+        let isCloudKitDisabled = environment["MINUTE_DISABLE_CLOUDKIT"] == "1"
+        let modelConfiguration: MinuteModelContainerConfiguration
+        if isRunningTests {
+            modelConfiguration = .inMemory
+        } else if !isSandboxed || isCloudKitDisabled {
+            // Unsandboxed local/CLI builds cannot carry the production iCloud
+            // entitlement. Keep them on the same explicit local store URL.
+            modelConfiguration = .local(url: MinuteStoreLocation.resolvedURL())
+        } else {
+            modelConfiguration = .privateCloudKit(
+                containerIdentifier: MinuteCloudKit.containerIdentifier,
+                storeURL: MinuteStoreLocation.resolvedURL()
+            )
+        }
 
         do {
-            let modelContainer = try ModelContainer(for: schema, configurations: [modelConfiguration])
+            let modelContainer = try MinuteModelContainerFactory.makeContainer(
+                configuration: modelConfiguration
+            )
             let calendarManager = CalendarManager()
 
             sharedModelContainer = modelContainer

@@ -4,6 +4,7 @@ import SwiftData
 enum MinuteDataError: LocalizedError {
     case invalidName(String)
     case invalidTitle
+    case invalidChecklistTitle
     case areaNotFound(String)
     case projectNotFound(String)
     case duplicateArea(String)
@@ -19,6 +20,8 @@ enum MinuteDataError: LocalizedError {
             return "\(entity) name cannot be empty."
         case .invalidTitle:
             return "Task title cannot be empty."
+        case .invalidChecklistTitle:
+            return "Checklist item title cannot be empty."
         case .areaNotFound(let name):
             return "Area '\(name)' was not found."
         case .projectNotFound(let name):
@@ -132,7 +135,9 @@ struct MinuteDataService {
         dueDate: Date? = nil,
         recurrenceInterval: String? = nil,
         orderIndex: Int? = nil,
-        sourceRequestID: String? = nil
+        sourceRequestID: String? = nil,
+        notes: String? = nil,
+        checklist: [TaskChecklistDraft] = []
     ) throws -> TaskItem {
         if let existing = try task(forSourceRequestID: sourceRequestID) {
             return existing
@@ -154,7 +159,11 @@ struct MinuteDataService {
         task.sourceRequestID = sourceRequestID
         task.recurrenceInterval = recurrenceInterval
         task.isRecurring = recurrenceInterval != nil
+        task.notes = normalizedNotes(notes)
         modelContext.insert(task)
+        if !checklist.isEmpty {
+            try replaceChecklist(on: task, with: checklist)
+        }
         return task
     }
 
@@ -166,7 +175,9 @@ struct MinuteDataService {
         recurrenceInterval: String? = nil,
         orderIndex: Int? = nil,
         parseNaturalLanguage: Bool = true,
-        sourceRequestID: String? = nil
+        sourceRequestID: String? = nil,
+        notes: String? = nil,
+        checklist: [TaskChecklistDraft] = []
     ) throws -> TaskItem {
         if let existing = try task(forSourceRequestID: sourceRequestID) {
             return existing
@@ -205,7 +216,9 @@ struct MinuteDataService {
             dueDate: dueDate ?? parsed?.date,
             recurrenceInterval: recurrenceInterval ?? parsed?.recurrenceInterval,
             orderIndex: orderIndex,
-            sourceRequestID: sourceRequestID
+            sourceRequestID: sourceRequestID,
+            notes: notes,
+            checklist: checklist
         )
     }
 
@@ -350,7 +363,10 @@ struct MinuteDataService {
         recurrenceInterval: String? = nil,
         clearRecurrence: Bool = false,
         completed: Bool? = nil,
-        orderIndex: Int? = nil
+        orderIndex: Int? = nil,
+        notes: String? = nil,
+        clearNotes: Bool = false,
+        checklist: [TaskChecklistDraft]? = nil
     ) throws {
         if let title {
             let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -379,13 +395,168 @@ struct MinuteDataService {
             task.recurrenceInterval = recurrenceInterval
             task.isRecurring = true
         }
+        if clearNotes {
+            task.notes = nil
+        } else if let notes {
+            task.notes = normalizedNotes(notes)
+        }
+        if let checklist {
+            try replaceChecklist(on: task, with: checklist)
+        }
         if let completed {
-            task.isCompleted = completed
-            task.completedAt = completed ? (task.completedAt ?? Date()) : nil
+            setTaskCompletion(task, isCompleted: completed)
         }
         if let orderIndex {
             task.orderIndex = orderIndex
         }
+    }
+
+    /// Replaces the task's one-level checklist in the supplied order.
+    /// Existing checklist objects are deleted so replacement is deterministic
+    /// and idempotent for command/API callers.
+    func replaceChecklist(on task: TaskItem, with drafts: [TaskChecklistDraft]) throws {
+        let normalizedDrafts = try drafts.map { draft in
+            let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty else {
+                throw MinuteDataError.invalidChecklistTitle
+            }
+            return TaskChecklistDraft(title: title, isCompleted: draft.isCompleted)
+        }
+
+        for item in task.checklist {
+            modelContext.delete(item)
+        }
+
+        let replacement = normalizedDrafts.enumerated().map { offset, draft in
+            let item = TaskChecklistItem(
+                title: draft.title,
+                isCompleted: draft.isCompleted,
+                orderIndex: offset,
+                task: task
+            )
+            modelContext.insert(item)
+            return item
+        }
+        task.checklist = replacement
+
+        // A replacement is also a checklist state change. An empty list does
+        // not alter parent completion, while a non-empty list follows the
+        // same invariants as individual item changes.
+        if !replacement.isEmpty {
+            if replacement.allSatisfy(\.isCompleted) {
+                setTaskCompletion(task, isCompleted: true)
+            } else if task.isCompleted {
+                setTaskCompletion(task, isCompleted: false)
+            }
+        }
+    }
+
+    /// Applies completion state to one checklist item and synchronizes its
+    /// parent task without erasing progress when the parent is reopened.
+    func setChecklistItemCompletion(
+        _ item: TaskChecklistItem,
+        isCompleted: Bool,
+        at date: Date = Date()
+    ) {
+        item.isCompleted = isCompleted
+        item.completedAt = isCompleted ? (item.completedAt ?? date) : nil
+
+        guard let task = item.task else { return }
+        if isCompleted {
+            if !task.checklist.isEmpty && task.checklist.allSatisfy(\.isCompleted) {
+                setTaskCompletion(task, isCompleted: true, at: date)
+            }
+        } else if task.isCompleted {
+            setTaskCompletion(task, isCompleted: false)
+        }
+    }
+
+    func setChecklistItemCompletion(
+        _ item: TaskChecklistItem,
+        completed: Bool,
+        at date: Date = Date()
+    ) {
+        setChecklistItemCompletion(item, isCompleted: completed, at: date)
+    }
+
+    /// Applies the parent completion invariant. Completing a task completes
+    /// every checklist item and stops active work; reopening preserves item
+    /// progress.
+    func setTaskCompletion(
+        _ task: TaskItem,
+        isCompleted: Bool,
+        at date: Date = Date()
+    ) {
+        task.isCompleted = isCompleted
+        task.completedAt = isCompleted ? (task.completedAt ?? date) : nil
+
+        if isCompleted {
+            for item in task.checklist {
+                item.isCompleted = true
+                item.completedAt = item.completedAt ?? date
+            }
+            task.workStartedAt = nil
+        }
+    }
+
+    func setTaskCompletion(
+        _ task: TaskItem,
+        completed: Bool,
+        at date: Date = Date()
+    ) {
+        setTaskCompletion(task, isCompleted: completed, at: date)
+    }
+
+    /// Starts work on exactly one task at a time.
+    func startWork(_ task: TaskItem, at date: Date = Date()) throws {
+        for otherTask in try fetchTasks() where otherTask.id != task.id {
+            otherTask.workStartedAt = nil
+        }
+        task.workStartedAt = date
+    }
+
+    func startWork(on task: TaskItem, at date: Date = Date()) throws {
+        try startWork(task, at: date)
+    }
+
+    func stopWork(_ task: TaskItem) {
+        task.workStartedAt = nil
+    }
+
+    func stopWork(on task: TaskItem) {
+        stopWork(task)
+    }
+
+    /// Duplicates a task as an incomplete sibling with fresh IDs and no work
+    /// state. Checklist titles/order/state are retained.
+    func duplicateTask(_ task: TaskItem) throws -> TaskItem {
+        let duplicate = TaskItem(
+            title: task.title,
+            orderIndex: task.orderIndex,
+            project: task.project,
+            estimatedDuration: task.estimatedDuration,
+            dueDate: task.dueDate,
+            notes: task.notes
+        )
+        duplicate.recurrenceInterval = task.recurrenceInterval
+        duplicate.isRecurring = task.isRecurring
+        duplicate.isCompleted = false
+        duplicate.completedAt = nil
+        duplicate.workStartedAt = nil
+        modelContext.insert(duplicate)
+
+        let drafts = task.checklist.map {
+            TaskChecklistDraft(title: $0.title, isCompleted: $0.isCompleted)
+        }
+        if !drafts.isEmpty {
+            try replaceChecklist(on: duplicate, with: drafts)
+        }
+        // A duplicate remains incomplete even when all copied checklist items
+        // were checked on the source task; the copied checklist state is kept.
+        duplicate.isCompleted = false
+        duplicate.completedAt = nil
+        duplicate.workStartedAt = nil
+        return duplicate
     }
 
     func deleteArea(_ area: Area, recursive: Bool) throws {
@@ -472,6 +643,10 @@ struct MinuteDataService {
         value.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
             .uppercased()
             .nilIfEmpty ?? "007AFF"
+    }
+
+    private func normalizedNotes(_ value: String?) -> String? {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? nil
     }
 }
 

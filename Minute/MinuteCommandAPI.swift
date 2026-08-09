@@ -22,8 +22,12 @@ struct MinuteCommandRequest: Codable {
         var clearDuration: Bool? = nil
         var clearRecurrence: Bool? = nil
         var clearWeeklyGoal: Bool? = nil
+        var notes: String? = nil
+        var clearNotes: Bool? = nil
+        var checklist: [TaskChecklistDraft]? = nil
         var recursive: Bool? = nil
         var limit: Int? = nil
+        var suggestions: [TaskSuggestionInput]? = nil
     }
 
     let version: Int
@@ -64,8 +68,18 @@ struct MinuteEntitySnapshot: Codable {
     let dueDate: Date?
     let isRecurring: Bool?
     let recurrenceInterval: String?
+    let notes: String?
+    let workStartedAt: Date?
+    let checklist: [MinuteChecklistItemSnapshot]?
     let projectCount: Int?
     let taskCount: Int?
+    var fingerprint: String? = nil
+    var sourceType: String? = nil
+    var sourceLabel: String? = nil
+    var sourceURL: String? = nil
+    var evidenceSnippet: String? = nil
+    var reason: String? = nil
+    var confidence: Double? = nil
 
     init(area: Area) {
         entity = "area"
@@ -86,6 +100,9 @@ struct MinuteEntitySnapshot: Codable {
         dueDate = nil
         isRecurring = nil
         recurrenceInterval = nil
+        notes = nil
+        workStartedAt = nil
+        checklist = nil
         projectCount = area.projects.count
         taskCount = area.projects.reduce(0) { $0 + $1.tasks.count }
     }
@@ -109,6 +126,9 @@ struct MinuteEntitySnapshot: Codable {
         dueDate = nil
         isRecurring = nil
         recurrenceInterval = nil
+        notes = nil
+        workStartedAt = nil
+        checklist = nil
         projectCount = nil
         taskCount = project.tasks.count
     }
@@ -132,8 +152,63 @@ struct MinuteEntitySnapshot: Codable {
         dueDate = task.dueDate
         isRecurring = task.isRecurring
         recurrenceInterval = task.recurrenceInterval
+        notes = task.notes
+        workStartedAt = task.workStartedAt
+        checklist = task.checklist.map(MinuteChecklistItemSnapshot.init(item:))
         projectCount = nil
         taskCount = nil
+    }
+
+    init(suggestion: TaskSuggestion) {
+        entity = "suggestion"
+        id = suggestion.id.uuidString
+        name = suggestion.title
+        createdAt = suggestion.generatedAt
+        orderIndex = suggestion.rank
+        sourceRequestID = suggestion.sourceRequestID
+        area = nil
+        project = suggestion.inferredProjectName
+        status = suggestion.status
+        themeColor = nil
+        iconName = nil
+        weeklyGoalSeconds = nil
+        isCompleted = nil
+        completedAt = nil
+        estimatedDuration = nil
+        dueDate = suggestion.dueDate
+        isRecurring = nil
+        recurrenceInterval = nil
+        notes = nil
+        workStartedAt = nil
+        checklist = nil
+        projectCount = nil
+        taskCount = nil
+        fingerprint = suggestion.fingerprint
+        sourceType = suggestion.sourceType
+        sourceLabel = suggestion.sourceLabel
+        sourceURL = suggestion.sourceURL
+        evidenceSnippet = suggestion.evidenceSnippet
+        reason = suggestion.reason
+        confidence = suggestion.confidence
+    }
+}
+
+struct MinuteChecklistItemSnapshot: Codable, Equatable {
+    let id: String
+    let title: String
+    let isCompleted: Bool
+    let completedAt: Date?
+    let orderIndex: Int
+    let createdAt: Date
+
+    @MainActor
+    init(item: TaskChecklistItem) {
+        id = item.id.uuidString
+        title = item.title
+        isCompleted = item.isCompleted
+        completedAt = item.completedAt
+        orderIndex = item.orderIndex
+        createdAt = item.createdAt
     }
 }
 
@@ -296,7 +371,7 @@ final class MinuteCommandProcessor: NSObject {
         guard request.version == 1 else {
             throw MinuteCommandAPIError.unsupportedVersion(request.version)
         }
-        let supportedActions = ["create", "list", "get", "update", "delete", "ping"]
+        let supportedActions = ["create", "import", "list", "get", "update", "delete", "accept", "dismiss", "ping"]
         guard supportedActions.contains(request.action) else {
             throw MinuteCommandAPIError.unsupportedAction(request.action)
         }
@@ -320,6 +395,48 @@ final class MinuteCommandProcessor: NSObject {
         }
         let payload = request.payload ?? MinuteCommandRequest.Payload()
         let service = MinuteDataService(modelContext: modelContext)
+
+        if request.action == "import", entity == "suggestion" {
+            let suggestions = try TaskSuggestionService(modelContext: modelContext)
+                .importSuggestions(payload.suggestions ?? [], sourceRequestID: request.requestID)
+            let items = suggestions.map(MinuteEntitySnapshot.init(suggestion:))
+            return MinuteCommandReceipt(
+                version: 1,
+                requestID: request.requestID,
+                status: "success",
+                entity: entity,
+                entityID: nil,
+                displayName: nil,
+                message: "Imported \(items.count) suggestion\(items.count == 1 ? "" : "s").",
+                processedAt: Date(),
+                items: items
+            )
+        }
+
+        if ["accept", "dismiss"].contains(request.action), entity == "suggestion" {
+            guard let identifier = payload.identifier else {
+                throw MinuteCommandAPIError.missingField("payload.identifier")
+            }
+            let suggestionService = TaskSuggestionService(modelContext: modelContext)
+            let suggestion = try suggestionService.resolve(identifier)
+            if request.action == "accept" {
+                _ = try suggestionService.accept(suggestion)
+            } else {
+                try suggestionService.dismiss(suggestion)
+            }
+            let snapshot = MinuteEntitySnapshot(suggestion: suggestion)
+            return MinuteCommandReceipt(
+                version: 1,
+                requestID: request.requestID,
+                status: "success",
+                entity: entity,
+                entityID: snapshot.id,
+                displayName: snapshot.name,
+                message: "\(request.action.capitalized)ed suggestion '\(snapshot.name)'.",
+                processedAt: Date(),
+                items: [snapshot]
+            )
+        }
 
         if request.action == "list" {
             return try list(entity: entity, payload: payload, requestID: request.requestID, service: service)
@@ -378,7 +495,9 @@ final class MinuteCommandProcessor: NSObject {
                 recurrenceInterval: payload.recurrence,
                 orderIndex: payload.orderIndex,
                 parseNaturalLanguage: payload.parseNaturalLanguage ?? true,
-                sourceRequestID: request.requestID
+                sourceRequestID: request.requestID,
+                notes: payload.notes,
+                checklist: payload.checklist ?? []
             )
             result = MinuteEntitySnapshot(task: task)
 
@@ -432,6 +551,15 @@ final class MinuteCommandProcessor: NSObject {
                 }
                 .prefix(limit)
                 .map(MinuteEntitySnapshot.init(task:))
+        case "suggestion":
+            items = try modelContext.fetch(FetchDescriptor<TaskSuggestion>())
+                .filter { payload.status == nil || $0.status == payload.status }
+                .sorted {
+                    if $0.rank != $1.rank { return $0.rank < $1.rank }
+                    return $0.generatedAt > $1.generatedAt
+                }
+                .prefix(limit)
+                .map(MinuteEntitySnapshot.init(suggestion:))
         default:
             throw MinuteCommandAPIError.unsupportedEntity(entity)
         }
@@ -530,6 +658,9 @@ final class MinuteCommandProcessor: NSObject {
                 || payload.recurrence != nil
                 || payload.clearRecurrence == true
                 || payload.completed != nil
+                || payload.notes != nil
+                || payload.clearNotes == true
+                || payload.checklist != nil
                 || payload.orderIndex != nil else {
                 throw MinuteCommandAPIError.missingField("an editable task field")
             }
@@ -545,7 +676,10 @@ final class MinuteCommandProcessor: NSObject {
                 recurrenceInterval: payload.recurrence,
                 clearRecurrence: payload.clearRecurrence ?? false,
                 completed: payload.completed,
-                orderIndex: payload.orderIndex
+                orderIndex: payload.orderIndex,
+                notes: payload.notes,
+                clearNotes: payload.clearNotes ?? false,
+                checklist: payload.checklist
             )
             item = MinuteEntitySnapshot(task: task)
         default:
@@ -620,6 +754,10 @@ final class MinuteCommandProcessor: NSObject {
             return MinuteEntitySnapshot(project: try service.resolveProject(identifier))
         case "task":
             return MinuteEntitySnapshot(task: try service.resolveTask(identifier))
+        case "suggestion":
+            return MinuteEntitySnapshot(
+                suggestion: try TaskSuggestionService(modelContext: modelContext).resolve(identifier)
+            )
         default:
             throw MinuteCommandAPIError.unsupportedEntity(entity)
         }

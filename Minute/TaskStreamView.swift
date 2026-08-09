@@ -130,6 +130,7 @@ struct TaskStreamView: View {
                 .padding(.horizontal)
                 .padding(.top)
                 .padding(.bottom, 8)
+                .zIndex(1)
                 // Removed explicit background to blend with sidebar
             
             // The Stream
@@ -399,7 +400,7 @@ struct TaskStreamView: View {
     
     private func syncTasks() {
         // Use streamTasks which already filters for active projects + incomplete/recently completed
-        let targetTasks = streamTasks.map { $0.task }.sorted { $0.orderIndex < $1.orderIndex }
+        let targetTasks = streamTasks.map { $0.task }.sorted(by: taskStreamOrder)
         let targetItems = targetTasks.compactMap { task -> StreamItem? in
             guard let project = task.project else { return nil }
             return StreamItem(task: task, project: project)
@@ -422,7 +423,7 @@ struct TaskStreamView: View {
         if !newItems.isEmpty {
             nextOrderedTasks.append(contentsOf: newItems)
             // Re-sort to be safe using persisted order
-            nextOrderedTasks.sort { $0.task.orderIndex < $1.task.orderIndex }
+            nextOrderedTasks.sort { taskStreamOrder($0.task, $1.task) }
         }
         
         // Remove deleted/completed
@@ -433,7 +434,7 @@ struct TaskStreamView: View {
         // If purely reorder happened elsewhere, we might want to respect orderIndex
         // But usually we are the only re-orderer.
         // Let's do a soft sort check.
-        nextOrderedTasks.sort { $0.task.orderIndex < $1.task.orderIndex }
+        nextOrderedTasks.sort { taskStreamOrder($0.task, $1.task) }
 
         if nextOrderedTasks.map({ $0.task.id }) != orderedTasks.map({ $0.task.id }) {
             orderedTasks = nextOrderedTasks
@@ -654,8 +655,25 @@ struct TaskStreamView: View {
     /// Sort helper: incomplete tasks first, then completed tasks
     private func sortWithCompletedLast(_ items: [StreamItem]) -> [StreamItem] {
         let incomplete = items.filter { !$0.task.isCompleted }
+        let active = incomplete.filter { $0.task.workStartedAt != nil }
+        let pending = incomplete.filter { $0.task.workStartedAt == nil }
         let completed = items.filter { $0.task.isCompleted }
-        return incomplete + completed
+        return active + pending + completed
+    }
+
+    private func taskStreamOrder(_ lhs: TaskItem, _ rhs: TaskItem) -> Bool {
+        if lhs.isCompleted != rhs.isCompleted {
+            return !lhs.isCompleted
+        }
+        let lhsIsWorking = lhs.workStartedAt != nil
+        let rhsIsWorking = rhs.workStartedAt != nil
+        if lhsIsWorking != rhsIsWorking {
+            return lhsIsWorking
+        }
+        if lhs.orderIndex != rhs.orderIndex {
+            return lhs.orderIndex < rhs.orderIndex
+        }
+        return lhs.createdAt < rhs.createdAt
     }
     
     var sections: [StreamSection] {
@@ -740,6 +758,7 @@ struct InlineTaskComposer: View {
     @State private var isInferringProject = false
     @State private var lastCreatedTask: TaskItem?
     @State private var feedbackTask: Task<Void, Never>?
+    @State private var editingSuggestion: TaskSuggestion?
     @AppStorage(CodexProjectInferenceSettings.enabledKey) private var experimentalCodexInferenceEnabled = false
     
     // Effective Values
@@ -1197,6 +1216,23 @@ struct InlineTaskComposer: View {
                     .transition(.opacity)
             }
         }
+        .overlay(alignment: .top) {
+            GeometryReader { proxy in
+                ZStack(alignment: .topLeading) {
+                    Color.clear
+                        .allowsHitTesting(false)
+
+                    if text.isEmpty {
+                        TaskSuggestionStrip(mode: .compact, onEdit: editSuggestion)
+                            .frame(width: max(0, proxy.size.width - 4), alignment: .leading)
+                            .offset(x: 2, y: proxy.size.height + 6)
+                            .zIndex(1)
+                            .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+                            .allowsHitTesting(true)
+                    }
+                }
+            }
+        }
         .animation(.easeInOut(duration: 0.2), value: isInferringProject)
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: text.isEmpty)
         .onDisappear {
@@ -1361,6 +1397,10 @@ struct InlineTaskComposer: View {
                 recurrenceInterval: recurrence
             )
             try service.save()
+            if let editingSuggestion {
+                try TaskSuggestionService(modelContext: modelContext)
+                    .markAccepted(editingSuggestion, task: task)
+            }
         } catch {
             print("Failed to create task: \(error)")
             return nil
@@ -1396,6 +1436,16 @@ struct InlineTaskComposer: View {
         detectedRecurrence = nil
         detectedIsEvent = false
         selectedRecurrence = nil
+        editingSuggestion = nil
+    }
+
+    private func editSuggestion(_ suggestion: TaskSuggestion) {
+        editingSuggestion = suggestion
+        selectedProject = suggestion.inferredProjectName.flatMap { name in
+            activeProjects.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        }
+        selectedDate = suggestion.dueDate
+        text = suggestion.title
     }
     
     private func formatDuration(_ seconds: TimeInterval) -> String {
@@ -1491,6 +1541,44 @@ struct StreamItem: Identifiable {
     let project: Project
 }
 
+private enum TaskRowActionFocus: Hashable {
+    case work
+    case actions
+}
+
+private final class TaskActionUndoTarget {
+    private let action: () -> Void
+
+    init(action: @escaping () -> Void) {
+        self.action = action
+    }
+
+    func perform() {
+        action()
+    }
+}
+
+private struct TaskActionDatePopover: View {
+    @Binding var selection: Date?
+    let onCommit: () -> Void
+
+    var body: some View {
+        VStack(spacing: 10) {
+            CustomDatePicker(selection: $selection)
+
+            Button("Reschedule") {
+                onCommit()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(selection == nil)
+            .accessibilityLabel("Reschedule task to selected date")
+        }
+        .padding(10)
+        .frame(width: 280)
+    }
+}
+
 // MARK: - Components
 
 struct TaskStreamRow: View {
@@ -1500,6 +1588,11 @@ struct TaskStreamRow: View {
     @Environment(\.modelContext) private var modelContext
     
     @State private var isHovering = false
+    @State private var actionDateSelection: Date?
+    @State private var showActionDatePicker = false
+    @State private var actionError: String?
+    @FocusState private var rowKeyboardFocused: Bool
+    @FocusState private var focusedAction: TaskRowActionFocus?
     
     // Inline Editing State
     @State private var isEditingTitle = false
@@ -1513,6 +1606,14 @@ struct TaskStreamRow: View {
     
     var projectColor: Color {
         Color(hex: item.project.area?.themeColor ?? "8E8E93") ?? .gray
+    }
+
+    private var projectIconName: String {
+        guard let iconName = item.project.area?.iconName,
+              !iconName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "folder"
+        }
+        return iconName
     }
 
     private static let shortDateFormatter: DateFormatter = {
@@ -1542,29 +1643,24 @@ struct TaskStreamRow: View {
     }
     
     @State private var isCompleting = false
+
+    private var dataService: MinuteDataService {
+        MinuteDataService(modelContext: modelContext)
+    }
+
+    private var actionControlsVisible: Bool {
+        isHovering || rowKeyboardFocused || focusedAction != nil
+    }
+
+    private var isWorking: Bool {
+        item.task.workStartedAt != nil
+    }
     
     var body: some View {
         HStack(spacing: 12) {
             // Checkbox (Completion)
             Button(action: {
-                withAnimation(.snappy) {
-                    isCompleting = true
-                }
-                // Capture task reference before async delay
-                let taskToComplete = item.task
-                let context = modelContext
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                    withAnimation {
-                        taskToComplete.isCompleted = true
-                        taskToComplete.completedAt = Date()
-                    }
-                    // Explicit save to ensure persistence
-                    do {
-                        try context.save()
-                    } catch {
-                        print("Failed to save task completion: \(error)")
-                    }
-                }
+                toggleCompletion()
             }) {
                 let isChecked = isCompleting || item.task.isCompleted
                 Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
@@ -1572,6 +1668,9 @@ struct TaskStreamRow: View {
                    .foregroundStyle(isChecked ? .green : .secondary)
             }
             .buttonStyle(.plain)
+            .help(item.task.isCompleted ? "Reopen task" : "Complete task")
+            .accessibilityLabel(item.task.isCompleted ? "Reopen task" : "Complete task")
+            .accessibilityHint("Uses the task service to update completion and checklist state.")
             
             // Content
             VStack(alignment: .leading, spacing: 4) {
@@ -1600,15 +1699,14 @@ struct TaskStreamRow: View {
                         }
                 }
                 
-                // Editable Metadata Row
-                HStack(spacing: 6) {
-                    // Project Badge (Editable)
+                // Keep the row focused on title, project, and deadline. Less-used
+                // scheduling controls remain available from the same popovers/menu.
+                HStack(spacing: 7) {
                     EditableBadge(showPopover: $showProjectPicker) {
                         HStack(spacing: 4) {
-                            if let icon = item.project.area?.iconName {
-                                Image(systemName: icon)
-                                    .font(.caption2)
-                            }
+                            Image(systemName: projectIconName)
+                                .font(.caption)
+                                .accessibilityHidden(true)
                             Text(item.project.name)
                                 .font(.caption)
                                 .lineLimit(1)
@@ -1619,91 +1717,83 @@ struct TaskStreamRow: View {
                             projects: activeProjects,
                             selection: .constant(item.task.project)
                         ) { project in
-                            ProjectInferenceMemory.record(text: item.task.title, projectName: project.name)
-                            item.task.project = project
+                            moveToProject(project)
                             showProjectPicker = false
                         }
                     }
-                    
-                    // Duration Badge (Editable)
+
                     if let duration = item.task.estimatedDuration {
                         EditableBadge(showPopover: $showDurationPicker) {
-                            HStack(spacing: 2) {
-                                Image(systemName: "hourglass")
-                                Text(formatDuration(duration))
-                            }
-                            .font(.caption2)
+                            Text(formatDuration(duration))
+                                .font(.caption)
                             .foregroundStyle(.secondary)
                         } popover: {
                             DurationPickerPopover(
                                 selection: Binding(
                                     get: { item.task.estimatedDuration },
-                                    set: { item.task.estimatedDuration = $0 }
+                                    set: { updateDuration($0) }
                                 ),
                                 isPresented: $showDurationPicker
                             )
                         }
                     }
-                    
-                    // Date Badge (Editable)
+
                     if let date = item.task.dueDate {
+                        Text("·")
+                            .foregroundStyle(.tertiary)
+                            .accessibilityHidden(true)
                         EditableBadge(showPopover: $showDatePicker) {
-                            HStack(spacing: 2) {
-                                Image(systemName: "calendar")
-                                Text(formatDate(date))
-                                    .foregroundStyle(isOverdue(date) ? .red : .secondary)
-                            }
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            Text(formatDate(date))
+                                .font(.caption)
+                                .foregroundStyle(isOverdue(date) ? .red : .secondary)
                         } popover: {
                             DatePickerPopover(
                                 selection: Binding(
                                     get: { item.task.dueDate },
-                                    set: { item.task.dueDate = $0 }
+                                    set: { updateDueDateFromEditor($0) }
                                 ),
                                 isPresented: $showDatePicker
                             )
                         }
                     }
-                    
-                    // Recurrence Badge (Editable)
-                    if item.task.isRecurring, let interval = item.task.recurrenceInterval {
-                        EditableBadge(showPopover: $showRecurrencePicker) {
-                            HStack(spacing: 2) {
-                                Image(systemName: "repeat")
-                                Text(interval.capitalized)
-                            }
-                            .font(.caption2)
-                            .foregroundStyle(.blue)
-                        } popover: {
-                            RecurrencePickerPopover(
-                                isRecurring: Binding(
-                                    get: { item.task.isRecurring },
-                                    set: { item.task.isRecurring = $0 }
-                                ),
-                                recurrenceInterval: Binding(
-                                    get: { item.task.recurrenceInterval },
-                                    set: { item.task.recurrenceInterval = $0 }
-                                ),
-                                isPresented: $showRecurrencePicker
-                            )
-                        }
+
+                    if isWorking {
+                        Text("Working")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                            .accessibilityLabel("Working")
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let actionError {
+                Text(actionError)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .lineLimit(1)
+                    .frame(maxWidth: 150, alignment: .trailing)
+                    .help(actionError)
+                    .accessibilityLabel("Task action error: \(actionError)")
+            }
+
+            taskActionControls
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 12)
-        .overlay(
-            Rectangle()
-                .frame(height: 1)
-                .foregroundStyle(Color.white.opacity(0.05)),
-            alignment: .bottom
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .background(
+            isHovering ? Color.primary.opacity(0.035) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
         )
-        .background(isHovering ? Color.accentColor.opacity(0.08) : Color.clear)
-        .cornerRadius(8)
         .contentShape(Rectangle())
+        .focusable()
+        .focused($rowKeyboardFocused)
+        .overlay {
+            if rowKeyboardFocused {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.accentColor.opacity(0.5), lineWidth: 1)
+            }
+        }
         .onHover { hover in
             isHovering = hover
         }
@@ -1716,13 +1806,456 @@ struct TaskStreamRow: View {
             onEdit()
         }
         .contextMenu {
-            Button("Edit Task...") { onEdit() }
-            Button("Rename") { startTitleEdit() }
-            Divider()
-            Button("Delete", role: .destructive) {
-                withAnimation {
-                    modelContext.delete(item.task)
+            taskContextMenuContent
+        }
+        .popover(isPresented: $showActionDatePicker, arrowEdge: .trailing) {
+            TaskActionDatePopover(selection: $actionDateSelection) {
+                guard let date = actionDateSelection else { return }
+                showActionDatePicker = false
+                reschedule(to: date)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var taskActionControls: some View {
+        HStack(spacing: 6) {
+            Button(action: toggleWork) {
+                Label(workActionTitle, systemImage: isWorking ? "stop.fill" : "play.fill")
+                    .font(.caption.weight(.medium))
+                    .labelStyle(.titleAndIcon)
+                    .lineLimit(1)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(isWorking ? .orange : .accentColor)
+            .focused($focusedAction, equals: .work)
+            .disabled(item.task.isCompleted)
+            .help(workActionTitle)
+            .accessibilityLabel(workActionTitle)
+            .accessibilityHint(isWorking ? "Stops the current task." : "Makes this the only active task.")
+
+            Menu {
+                taskActionMenuContent
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.caption)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .focused($focusedAction, equals: .actions)
+            .help("Task actions")
+            .accessibilityLabel("Task actions")
+        }
+        .frame(width: actionControlsVisible ? 100 : 0, alignment: .trailing)
+        .clipped()
+        .opacity(actionControlsVisible ? 1 : 0)
+        .allowsHitTesting(actionControlsVisible)
+        .animation(.easeInOut(duration: 0.15), value: actionControlsVisible)
+    }
+
+    private var workActionTitle: String {
+        isWorking ? "Stop Working" : "Start Work"
+    }
+
+    @ViewBuilder
+    private var taskActionMenuContent: some View {
+        Menu("Reschedule") {
+            Button("Today") {
+                reschedule(to: DueDateSupport.presetToday())
+            }
+            Button("Tomorrow") {
+                reschedule(to: DueDateSupport.presetTomorrow())
+            }
+            Button("Next Saturday") {
+                reschedule(to: DueDateSupport.presetNextSaturday())
+            }
+            Button("Choose Date") {
+                actionDateSelection = item.task.dueDate ?? Date()
+                showActionDatePicker = true
+            }
+        }
+
+        if item.task.dueDate != nil {
+            Button("Clear Date") {
+                clearDate()
+            }
+        }
+
+        Menu("Move to Project") {
+            ForEach(activeProjects) { project in
+                Button {
+                    moveToProject(project)
+                } label: {
+                    HStack {
+                        if let icon = project.area?.iconName {
+                            Image(systemName: icon)
+                        }
+                        Text(project.name)
+                        if item.task.project?.id == project.id {
+                            Spacer()
+                            Image(systemName: "checkmark")
+                        }
+                    }
                 }
+                .disabled(item.task.project?.id == project.id)
+            }
+        }
+
+        Divider()
+
+        Button("Duplicate") {
+            duplicateTask()
+        }
+        Button("Edit Task") {
+            onEdit()
+        }
+        Button("Delete", role: .destructive) {
+            deleteTask()
+        }
+    }
+
+    @ViewBuilder
+    private var taskContextMenuContent: some View {
+        Button(workActionTitle) {
+            toggleWork()
+        }
+        .disabled(item.task.isCompleted)
+
+        Divider()
+        taskActionMenuContent
+    }
+
+    private func toggleCompletion() {
+        guard !isCompleting else { return }
+        let shouldComplete = !item.task.isCompleted
+        if shouldComplete {
+            withAnimation(.snappy) {
+                isCompleting = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                setCompletion(shouldComplete)
+            }
+        } else {
+            setCompletion(shouldComplete)
+        }
+    }
+
+    private func setCompletion(_ completed: Bool) {
+        let previousValue = item.task.isCompleted
+        let previousWorkStart = item.task.workStartedAt
+        let previousChecklist = item.task.checklist.map {
+            ChecklistValue(item: $0, isCompleted: $0.isCompleted, completedAt: $0.completedAt)
+        }
+        do {
+            dataService.setTaskCompletion(item.task, completed: completed)
+            try dataService.save()
+            registerUndo(actionName: completed ? "Complete Task" : "Reopen Task") {
+                dataService.setTaskCompletion(item.task, completed: previousValue)
+                for checklistValue in previousChecklist {
+                    dataService.setChecklistItemCompletion(
+                        checklistValue.item,
+                        isCompleted: checklistValue.isCompleted,
+                        at: checklistValue.completedAt ?? Date()
+                    )
+                    checklistValue.item.completedAt = checklistValue.completedAt
+                }
+                dataService.setTaskCompletion(item.task, completed: previousValue)
+                if let previousWorkStart, !previousValue {
+                    try? dataService.startWork(item.task, at: previousWorkStart)
+                }
+                try? dataService.save()
+            }
+            withAnimation {
+                isCompleting = false
+            }
+            actionError = nil
+        } catch {
+            isCompleting = false
+            showActionError(error)
+        }
+    }
+
+    private struct ChecklistValue {
+        let item: TaskChecklistItem
+        let isCompleted: Bool
+        let completedAt: Date?
+    }
+
+    private func toggleWork() {
+        guard !item.task.isCompleted else { return }
+        if isWorking {
+            stopWork()
+        } else {
+            startWork()
+        }
+    }
+
+    private func startWork() {
+        let previousWorkingTasks = (try? dataService.fetchTasks())?.filter {
+            $0.id != item.task.id && $0.workStartedAt != nil
+        } ?? []
+
+        do {
+            try dataService.startWork(item.task)
+            try dataService.save()
+            registerUndo(actionName: "Start Work") {
+                dataService.stopWork(item.task)
+                for task in previousWorkingTasks {
+                    try? dataService.startWork(task)
+                }
+                try? dataService.save()
+            }
+            actionError = nil
+        } catch {
+            showActionError(error)
+        }
+    }
+
+    private func stopWork() {
+        let previousStart = item.task.workStartedAt
+        do {
+            dataService.stopWork(item.task)
+            try dataService.save()
+            registerUndo(actionName: "Stop Work") {
+                try? dataService.startWork(item.task)
+                item.task.workStartedAt = previousStart
+                try? dataService.save()
+            }
+            actionError = nil
+        } catch {
+            showActionError(error)
+        }
+    }
+
+    private func reschedule(to targetDay: Date) {
+        let previousDate = item.task.dueDate
+        let nextDate = DueDateSupport.rescheduledDate(from: previousDate, to: targetDay)
+        guard previousDate != nextDate else { return }
+
+        do {
+            try dataService.updateTask(item.task, dueDate: nextDate)
+            try dataService.save()
+            registerUndo(actionName: "Reschedule Task") {
+                if let previousDate {
+                    try? dataService.updateTask(item.task, dueDate: previousDate)
+                } else {
+                    try? dataService.updateTask(item.task, clearDueDate: true)
+                }
+                try? dataService.save()
+            }
+            actionError = nil
+        } catch {
+            showActionError(error)
+        }
+    }
+
+    private func clearDate() {
+        guard let previousDate = item.task.dueDate else { return }
+        do {
+            try dataService.updateTask(item.task, clearDueDate: true)
+            try dataService.save()
+            registerUndo(actionName: "Clear Date") {
+                try? dataService.updateTask(item.task, dueDate: previousDate)
+                try? dataService.save()
+            }
+            actionError = nil
+        } catch {
+            showActionError(error)
+        }
+    }
+
+    private func moveToProject(_ project: Project) {
+        guard item.task.project?.id != project.id else { return }
+        let previousProject = item.task.project
+        do {
+            try dataService.updateTask(item.task, projectName: project.name)
+            ProjectInferenceMemory.record(text: item.task.title, projectName: project.name)
+            try dataService.save()
+            registerUndo(actionName: "Move Task") {
+                item.task.project = previousProject
+                try? dataService.save()
+            }
+            actionError = nil
+        } catch {
+            showActionError(error)
+        }
+    }
+
+    private func updateDueDateFromEditor(_ date: Date?) {
+        if date == nil {
+            clearDate()
+        } else if let date {
+            let previousDate = item.task.dueDate
+            guard previousDate != date else { return }
+            do {
+                try dataService.updateTask(item.task, dueDate: date)
+                try dataService.save()
+                registerUndo(actionName: "Change Due Date") {
+                    if let previousDate {
+                        try? dataService.updateTask(item.task, dueDate: previousDate)
+                    } else {
+                        try? dataService.updateTask(item.task, clearDueDate: true)
+                    }
+                    try? dataService.save()
+                }
+                actionError = nil
+            } catch {
+                showActionError(error)
+            }
+        }
+    }
+
+    private func updateDuration(_ duration: TimeInterval?) {
+        guard item.task.estimatedDuration != duration else { return }
+        let previousDuration = item.task.estimatedDuration
+        do {
+            if let duration {
+                try dataService.updateTask(item.task, estimatedDuration: duration)
+            } else {
+                try dataService.updateTask(item.task, clearDuration: true)
+            }
+            try dataService.save()
+            registerUndo(actionName: "Change Duration") {
+                if let previousDuration {
+                    try? dataService.updateTask(item.task, estimatedDuration: previousDuration)
+                } else {
+                    try? dataService.updateTask(item.task, clearDuration: true)
+                }
+                try? dataService.save()
+            }
+            actionError = nil
+        } catch {
+            showActionError(error)
+        }
+    }
+
+    private func updateRecurrence(isRecurring: Bool, interval: String?) {
+        let nextRecurring = isRecurring
+        let nextInterval = nextRecurring ? (interval ?? "daily") : nil
+        guard item.task.isRecurring != nextRecurring || item.task.recurrenceInterval != nextInterval else { return }
+        let previousRecurring = item.task.isRecurring
+        let previousInterval = item.task.recurrenceInterval
+        do {
+            if let nextInterval {
+                try dataService.updateTask(item.task, recurrenceInterval: nextInterval)
+            } else {
+                try dataService.updateTask(item.task, clearRecurrence: true)
+            }
+            try dataService.save()
+            registerUndo(actionName: "Change Recurrence") {
+                if let previousInterval, previousRecurring {
+                    try? dataService.updateTask(item.task, recurrenceInterval: previousInterval)
+                } else {
+                    try? dataService.updateTask(item.task, clearRecurrence: true)
+                }
+                try? dataService.save()
+            }
+            actionError = nil
+        } catch {
+            showActionError(error)
+        }
+    }
+
+    private func duplicateTask() {
+        do {
+            let duplicate = try dataService.duplicateTask(item.task)
+            try dataService.save()
+            registerUndo(actionName: "Duplicate Task") {
+                dataService.deleteTask(duplicate)
+                try? dataService.save()
+            }
+            actionError = nil
+        } catch {
+            showActionError(error)
+        }
+    }
+
+    private struct TaskValueSnapshot {
+        let title: String
+        let project: Project?
+        let estimatedDuration: TimeInterval?
+        let dueDate: Date?
+        let isRecurring: Bool
+        let recurrenceInterval: String?
+        let notes: String?
+        let checklist: [TaskChecklistDraft]
+        let isCompleted: Bool
+        let completedAt: Date?
+        let workStartedAt: Date?
+        let orderIndex: Int
+
+        init(task: TaskItem) {
+            title = task.title
+            project = task.project
+            estimatedDuration = task.estimatedDuration
+            dueDate = task.dueDate
+            isRecurring = task.isRecurring
+            recurrenceInterval = task.recurrenceInterval
+            notes = task.notes
+            checklist = task.checklist.map { TaskChecklistDraft(title: $0.title, isCompleted: $0.isCompleted) }
+            isCompleted = task.isCompleted
+            completedAt = task.completedAt
+            workStartedAt = task.workStartedAt
+            orderIndex = task.orderIndex
+        }
+    }
+
+    private func deleteTask() {
+        let snapshot = TaskValueSnapshot(task: item.task)
+        do {
+            dataService.deleteTask(item.task)
+            try dataService.save()
+            registerUndo(actionName: "Delete Task") {
+                guard let restored = try? dataService.createTask(
+                    title: snapshot.title,
+                    project: snapshot.project,
+                    estimatedDuration: snapshot.estimatedDuration,
+                    dueDate: snapshot.dueDate,
+                    recurrenceInterval: snapshot.recurrenceInterval,
+                    orderIndex: snapshot.orderIndex,
+                    notes: snapshot.notes,
+                    checklist: snapshot.checklist
+                ) else { return }
+                restored.isRecurring = snapshot.isRecurring
+                if snapshot.isCompleted {
+                    dataService.setTaskCompletion(
+                        restored,
+                        completed: true,
+                        at: snapshot.completedAt ?? Date()
+                    )
+                    restored.completedAt = snapshot.completedAt
+                } else {
+                    dataService.setTaskCompletion(restored, completed: false)
+                    if let workStartedAt = snapshot.workStartedAt {
+                        try? dataService.startWork(restored, at: workStartedAt)
+                    }
+                }
+                try? dataService.save()
+            }
+            actionError = nil
+        } catch {
+            showActionError(error)
+        }
+    }
+
+    private func registerUndo(actionName: String, _ action: @escaping () -> Void) {
+        guard let undoManager = modelContext.undoManager else { return }
+        let target = TaskActionUndoTarget(action: action)
+        undoManager.registerUndo(withTarget: target) { target in
+            target.perform()
+        }
+        undoManager.setActionName(actionName)
+    }
+
+    private func showActionError(_ error: Error) {
+        actionError = error.localizedDescription
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+            if actionError == error.localizedDescription {
+                actionError = nil
             }
         }
     }
@@ -1739,8 +2272,14 @@ struct TaskStreamRow: View {
     
     private func saveTitle() {
         let trimmed = editedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            item.task.title = trimmed
+        if !trimmed.isEmpty && trimmed != item.task.title {
+            do {
+                try dataService.updateTask(item.task, title: trimmed)
+                try dataService.save()
+                actionError = nil
+            } catch {
+                showActionError(error)
+            }
         }
         isEditingTitle = false
     }
@@ -1777,29 +2316,67 @@ struct ScheduleHighlightsCard: View {
         calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now)) ?? now
     }
 
-    private var hasAnyEvents: Bool {
-        !todayEvents.isEmpty || !tomorrowEvents.isEmpty
+    private var hasMeaningfulSchedule: Bool {
+        !todayEvents.isEmpty ||
+        !tomorrowEvents.isEmpty ||
+        todayBusySeconds > 0 ||
+        tomorrowBusySeconds > 0
+    }
+
+    private var hasMeaningfulToday: Bool {
+        !todayEvents.isEmpty || todayBusySeconds > 0
+    }
+
+    private var hasMeaningfulTomorrow: Bool {
+        !tomorrowEvents.isEmpty || tomorrowBusySeconds > 0
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Schedule Highlights")
-                        .font(.headline)
-                        .foregroundStyle(.secondary)
+        Group {
+            if hasMeaningfulSchedule {
+                populatedSchedule
+            } else {
+                emptySchedule
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: isExpanded)
+    }
 
-                    if let nextEvent {
-                        Text(nextEventDescription(for: nextEvent))
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                    } else {
-                        Text("No upcoming events in the next two days.")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
+    private var emptySchedule: some View {
+        HStack(alignment: .center, spacing: 14) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Schedule")
+                    .font(.subheadline.weight(.semibold))
+
+                Text("Nothing scheduled today")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                if let nextEvent {
+                    Text(nextEventSummary(for: nextEvent))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
+            }
+
+            Spacer(minLength: 12)
+
+            Button("Open Calendar") {
+                onOpenCalendarDay(now)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var populatedSchedule: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center) {
+                Text("Schedule")
+                    .font(.headline)
 
                 Spacer()
 
@@ -1811,106 +2388,70 @@ struct ScheduleHighlightsCard: View {
                         isExpanded.toggle()
                     }
                 } label: {
-                    HStack(spacing: 5) {
-                        Text(isExpanded ? "Collapse" : "Full Schedule")
+                    HStack(spacing: 4) {
+                        Text(isExpanded ? "Hide details" : "Details")
                         Image(systemName: "chevron.down")
                             .rotationEffect(.degrees(isExpanded ? 180 : 0))
                     }
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.secondary.opacity(0.12), in: Capsule())
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(isExpanded ? "Hide schedule details" : "Show schedule details")
             }
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ScheduleMetricPill(icon: "sun.max.fill", text: "Today \(todayEvents.count)")
-                    ScheduleMetricPill(icon: "moon.stars.fill", text: "Tomorrow \(tomorrowEvents.count)")
-                    ScheduleMetricPill(icon: "clock.fill", text: "\(formatBusyDuration(todayBusySeconds)) busy today")
-                    ScheduleMetricPill(icon: "clock.badge.checkmark.fill", text: "\(formatBusyDuration(tomorrowBusySeconds)) busy tomorrow")
-                }
+            if let nextEvent {
+                Text(nextEventSummary(for: nextEvent))
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(2)
             }
 
-            compactPreview
+            scheduleSummary
 
             if isExpanded {
                 expandedTimeline
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
-
-            if !isExpanded {
-                HStack {
-                    Text(collapsedFooterText)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                    Button("Open Calendar") {
-                        onOpenCalendarDay(now)
-                    }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-                }
-            }
         }
-        .padding(10)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.white.opacity(0.07), lineWidth: 1)
-        )
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .contain)
     }
 
     @ViewBuilder
-    private var compactPreview: some View {
-        if !highlights.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(highlights.prefix(2))) { highlight in
-                    ScheduleHighlightRow(highlight: highlight)
-                }
+    private var scheduleSummary: some View {
+        HStack(spacing: 14) {
+            if hasMeaningfulToday {
+                scheduleDaySummary(title: "Today", events: todayEvents, busySeconds: todayBusySeconds)
             }
-        } else if !todayEvents.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(todayEvents.indices.prefix(2), id: \.self) { index in
-                    CalendarEventRow(event: todayEvents[index], referenceDate: now)
-                }
-            }
-        } else {
-            Text(compactTodayStatusText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.vertical, 4)
-        }
 
-        HStack(spacing: 8) {
-            Text("Tomorrow")
-                .font(.caption2)
+            if hasMeaningfulTomorrow {
+                if hasMeaningfulToday {
+                    Text("·")
+                        .foregroundStyle(.tertiary)
+                }
+                scheduleDaySummary(title: "Tomorrow", events: tomorrowEvents, busySeconds: tomorrowBusySeconds)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    private func scheduleDaySummary(
+        title: String,
+        events: [EKEvent],
+        busySeconds: TimeInterval
+    ) -> some View {
+        HStack(spacing: 4) {
+            Text(title)
                 .fontWeight(.semibold)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.secondary.opacity(0.1), in: Capsule())
 
-            if let tomorrowFirst = tomorrowEvents.first {
-                Text(tomorrowPreviewText(for: tomorrowFirst))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            } else {
-                Text("No events yet.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+            if !events.isEmpty {
+                Text("· \(events.count) event\(events.count == 1 ? "" : "s")")
             }
-        }
 
-        let hiddenTodayCount = max(todayEvents.count - 2, 0)
-        let hiddenTomorrowCount = max(tomorrowEvents.count - 1, 0)
-        if hiddenTodayCount > 0 || hiddenTomorrowCount > 0 {
-            Text("+\(hiddenTodayCount) more today, +\(hiddenTomorrowCount) more tomorrow")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+            if busySeconds > 0 {
+                Text("· \(formatBusyDuration(busySeconds)) busy")
+            }
         }
     }
 
@@ -1950,24 +2491,21 @@ struct ScheduleHighlightsCard: View {
                 Button("Open Today") {
                     onOpenCalendarDay(now)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .foregroundStyle(.tint)
                 .controlSize(.small)
 
                 Button("Open Tomorrow") {
                     onOpenCalendarDay(tomorrowDate)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .foregroundStyle(.tint)
                 .controlSize(.small)
 
                 Spacer()
             }
         }
-        .padding(10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-        )
+        .padding(.top, 2)
     }
 
     @ViewBuilder
@@ -1985,16 +2523,15 @@ struct ScheduleHighlightsCard: View {
 
                 Spacer()
 
-                Text("\(events.count)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.secondary.opacity(0.1), in: Capsule())
+                if !events.isEmpty {
+                    Text("\(events.count) event\(events.count == 1 ? "" : "s")")
+                        .font(.caption)
+                }
 
-                Text("\(formatBusyDuration(busySeconds)) busy")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                if busySeconds > 0 {
+                    Text("· \(formatBusyDuration(busySeconds)) busy")
+                        .font(.caption)
+                }
             }
 
             if events.isEmpty {
@@ -2007,40 +2544,30 @@ struct ScheduleHighlightsCard: View {
                 }
             }
         }
-        .padding(8)
-        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.vertical, 4)
     }
 
-    private func tomorrowPreviewText(for event: EKEvent) -> String {
-        let timeText = event.isAllDay ? "All Day" : event.startDate.formatted(date: .omitted, time: .shortened)
-        return "\(timeText) · \(event.title ?? "Untitled Event")"
-    }
-
-    private func nextEventDescription(for event: EKEvent) -> String {
+    private func nextEventSummary(for event: EKEvent) -> String {
         let title = event.title ?? "Untitled Event"
 
         if event.startDate <= now && event.endDate > now {
-            return "Happening now: \(title)"
+            return "Now · \(title)"
         }
 
-        let offset = relativeOffsetText(to: event.startDate)
-        return offset.isEmpty ? "Next: \(title)" : "Next: \(title) \(offset)"
-    }
-
-    private func relativeOffsetText(to date: Date) -> String {
-        let interval = max(0, date.timeIntervalSince(now))
-        let formatter = DateComponentsFormatter()
-        formatter.unitsStyle = .abbreviated
-        formatter.maximumUnitCount = 2
-        if interval < 3600 {
-            formatter.allowedUnits = [.minute]
-        } else if interval < 86_400 {
-            formatter.allowedUnits = [.hour, .minute]
+        let dateText: String
+        if calendar.isDate(event.startDate, inSameDayAs: now) {
+            dateText = event.isAllDay
+                ? "Today"
+                : "Today · \(event.startDate.formatted(date: .omitted, time: .shortened))"
+        } else if calendar.isDate(event.startDate, inSameDayAs: tomorrowDate) {
+            dateText = event.isAllDay
+                ? "Tomorrow"
+                : "Tomorrow · \(event.startDate.formatted(date: .omitted, time: .shortened))"
         } else {
-            formatter.allowedUnits = [.day, .hour]
+            dateText = event.startDate.formatted(date: .abbreviated, time: event.isAllDay ? .omitted : .shortened)
         }
-        let value = formatter.string(from: interval) ?? ""
-        return value.isEmpty ? "" : "(in \(value))"
+
+        return "Next · \(title) · \(dateText)"
     }
 
     private func formatBusyDuration(_ seconds: TimeInterval) -> String {
@@ -2059,28 +2586,6 @@ struct ScheduleHighlightsCard: View {
         return "\(hours)h \(minutes)m"
     }
 
-    private var isTodayCleared: Bool {
-        todayEvents.isEmpty && !tomorrowEvents.isEmpty
-    }
-
-    private var compactTodayStatusText: String {
-        if isTodayCleared {
-            return "No more events today. Looking ahead to tomorrow."
-        }
-        return "No key events coming up today."
-    }
-
-    private var collapsedFooterText: String {
-        if hasAnyEvents {
-            if isTodayCleared {
-                let plural = tomorrowEvents.count == 1 ? "" : "s"
-                return "Today is wrapped. Tomorrow has \(tomorrowEvents.count) event\(plural)."
-            }
-            return "Expand to browse the full timeline."
-        }
-        return "Nothing scheduled right now."
-    }
-
     private var preferredExpandedFilter: ScheduleExpandedFilter {
         if !todayEvents.isEmpty && !tomorrowEvents.isEmpty {
             return .both
@@ -2092,71 +2597,6 @@ struct ScheduleHighlightsCard: View {
             return .tomorrow
         }
         return .both
-    }
-}
-
-private struct ScheduleMetricPill: View {
-    let icon: String
-    let text: String
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: icon)
-                .font(.caption2)
-            Text(text)
-                .font(.caption2)
-                .fontWeight(.medium)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.secondary.opacity(0.1), in: Capsule())
-        .foregroundStyle(.secondary)
-    }
-}
-
-struct ScheduleHighlightRow: View {
-    let highlight: CalendarHighlight
-
-    var body: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .trailing, spacing: 0) {
-                if highlight.isAllDay {
-                    Text("All Day")
-                        .font(.caption2)
-                        .fontWeight(.semibold)
-                } else {
-                    Text(highlight.startDate, style: .time)
-                        .font(.caption2)
-                        .fontWeight(.bold)
-                    Text(highlight.endDate, style: .time)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(width: 52, alignment: .trailing)
-
-            RoundedRectangle(cornerRadius: 2)
-                .fill(Color(nsColor: highlight.calendarColor))
-                .frame(width: 4)
-                .padding(.vertical, 2)
-
-            HStack(spacing: 6) {
-                if highlight.kind == .specialDay {
-                    Image(systemName: "sparkles")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Text(highlight.title)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
-            }
-
-            Spacer()
-        }
-        .padding(8)
-        .background(Color.primary.opacity(0.03))
-        .cornerRadius(6)
     }
 }
 

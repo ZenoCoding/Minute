@@ -138,9 +138,46 @@ struct SmartInputParser {
         let dateHasExplicitTime: Bool
         let recurrenceInterval: String?
         let entryType: EntryType
+        let metadataSpans: [ComposerMetadataSpan]
 
         var isEvent: Bool {
             entryType == .event
+        }
+    }
+
+    /// A source-range projection for presentation in the quick composer.
+    ///
+    /// Ranges use UTF-16 offsets so they can be passed directly to Foundation
+    /// and safely converted back to `String` ranges at the presentation edge.
+    /// These spans are intentionally separate from `cleanTitle`: the parser's
+    /// existing title-cleaning behavior remains authoritative and unchanged.
+    struct ComposerMetadataSpan: Equatable, Identifiable, Sendable {
+        enum Kind: String, CaseIterable, Sendable {
+            case dueDate
+            case duration
+            case project
+            case recurrence
+            case event
+        }
+
+        let kind: Kind
+        let location: Int
+        let length: Int
+        let sourceText: String
+
+        var id: String {
+            "\(kind.rawValue)-\(location)-\(length)"
+        }
+
+        var range: NSRange {
+            NSRange(location: location, length: length)
+        }
+
+        fileprivate init(kind: Kind, range: NSRange, sourceText: String) {
+            self.kind = kind
+            self.location = range.location
+            self.length = range.length
+            self.sourceText = sourceText
         }
     }
 
@@ -181,6 +218,10 @@ struct SmartInputParser {
         pattern: #"(?i)(?:^\s*(?:event|evt|calendar|cal)\s*:?\s*)|(?:\s+(?:event|evt|calendar|cal)\s*:?\s*$)"#,
         options: []
     )
+    private static let duePrefixRegex = try? NSRegularExpression(
+        pattern: #"\bdue\s+(?:on\s+)?(?:the\s+)?"#,
+        options: .caseInsensitive
+    )
     private static let explicitTimeRegex = try? NSRegularExpression(
         pattern: #"(?i)\b(?:(?:1[0-2]|[1-9])(?::[0-5]\d)?\s?[ap]m|(?:[01]?\d|2[0-3]):[0-5]\d|noon|midnight|tonight)\b"#,
         options: []
@@ -214,6 +255,280 @@ struct SmartInputParser {
         )
     }
 
+    // MARK: - Composer presentation spans
+
+    /// Projects only deterministic recognitions back onto the original input.
+    ///
+    /// The parser intentionally has richer matching behavior than this method:
+    /// correction memory, hint matching, prefixes, and embeddings can all
+    /// produce an effective project without a trustworthy source phrase. Those
+    /// recognitions remain chips, but they do not replace arbitrary title text
+    /// in the source-aware preview.
+    private static func deterministicMetadataSpans(
+        in text: String,
+        projectCandidates: [ProjectCandidate],
+        result: CoreResult
+    ) -> [ComposerMetadataSpan] {
+        var spans: [ComposerMetadataSpan] = []
+
+        let eventRanges = matches(
+            of: eventMarkerRegex,
+            in: text
+        )
+        if result.entryType == .event {
+            for range in eventRanges {
+                if let span = makeSpan(kind: .event, range: range, in: text) {
+                    spans.append(span)
+                }
+            }
+        }
+
+        let eventMaskedText = mask(text, ranges: eventRanges)
+
+        // The parser's first project pass is exact token-sequence matching.
+        // Only that pass gets a source span; fuzzy and semantic matches do not.
+        if let projectName = result.projectName {
+            let sortedCandidates = projectCandidates.sorted { $0.name.count > $1.name.count }
+            if let candidate = sortedCandidates.first(where: {
+                $0.name.caseInsensitiveCompare(projectName) == .orderedSame
+            }), let range = tokenSequenceRange(for: candidate.name, in: eventMaskedText) {
+                if let span = makeSpan(kind: .project, range: range, in: text) {
+                    spans.append(span)
+                }
+            }
+        }
+
+        var metadataMaskedText = eventMaskedText
+        let durationRanges = matches(of: durationRegex, in: metadataMaskedText)
+        if result.duration != nil {
+            for range in durationRanges {
+                if let span = makeSpan(kind: .duration, range: range, in: text) {
+                    spans.append(span)
+                }
+            }
+            metadataMaskedText = mask(metadataMaskedText, ranges: durationRanges)
+        }
+
+        var dateSpan: ComposerMetadataSpan?
+        if result.date != nil {
+            let duePrefixRanges = matches(of: duePrefixRegex, in: metadataMaskedText)
+            let dateSearchText = mask(metadataMaskedText, ranges: duePrefixRanges)
+            let normalizedDateText = normalizeDateTypos(dateSearchText)
+
+            if let detector = dateDetector {
+                let dateMatches = detector.matches(
+                    in: normalizedDateText,
+                    options: [],
+                    range: NSRange(normalizedDateText.startIndex..., in: normalizedDateText)
+                )
+                if let dateMatch = dateMatches.last {
+                    let dateRange = dateMatch.range
+                    let duePrefix = duePrefixRanges.last {
+                        NSMaxRange($0) <= dateRange.location &&
+                        dateRange.location - NSMaxRange($0) <= 1
+                    }
+                    let sourceRange: NSRange
+                    if let duePrefix {
+                        sourceRange = NSRange(
+                            location: duePrefix.location,
+                            length: NSMaxRange(dateRange) - duePrefix.location
+                        )
+                    } else {
+                        sourceRange = dateRange
+                    }
+                    dateSpan = makeSpan(kind: .dueDate, range: sourceRange, in: text)
+                }
+            }
+
+            if dateSpan == nil {
+                let dayMatches = matches(of: dayOfMonthRegex, in: dateSearchText)
+                if let dayMatch = dayMatches.last {
+                    let duePrefix = duePrefixRanges.last {
+                        NSMaxRange($0) <= dayMatch.location &&
+                        dayMatch.location - NSMaxRange($0) <= 1
+                    }
+                    let sourceRange: NSRange
+                    if let duePrefix {
+                        sourceRange = NSRange(
+                            location: duePrefix.location,
+                            length: NSMaxRange(dayMatch) - duePrefix.location
+                        )
+                    } else {
+                        sourceRange = dayMatch
+                    }
+                    dateSpan = makeSpan(kind: .dueDate, range: sourceRange, in: text)
+                }
+            }
+        }
+
+        if let dateSpan {
+            spans.append(dateSpan)
+            metadataMaskedText = mask(metadataMaskedText, ranges: [dateSpan.range])
+        }
+
+        if let recurrence = result.recurrenceInterval {
+            let recurrencePatterns = [
+                (pattern: #"\b(every day|daily)\b"#, interval: "daily"),
+                (pattern: #"\b(every week|weekly)\b"#, interval: "weekly")
+            ]
+            for item in recurrencePatterns where item.interval == recurrence.lowercased() {
+                guard let regex = try? NSRegularExpression(pattern: item.pattern, options: .caseInsensitive),
+                      let range = regex.firstMatch(
+                        in: metadataMaskedText,
+                        options: [],
+                        range: NSRange(metadataMaskedText.startIndex..., in: metadataMaskedText)
+                      )?.range,
+                      let span = makeSpan(kind: .recurrence, range: range, in: text) else {
+                    continue
+                }
+                spans.append(span)
+                break
+            }
+        }
+
+        return nonOverlappingSpans(spans)
+    }
+
+    private static func matches(
+        of regex: NSRegularExpression?,
+        in text: String
+    ) -> [NSRange] {
+        guard let regex else { return [] }
+        return regex.matches(
+            in: text,
+            options: [],
+            range: NSRange(text.startIndex..., in: text)
+        ).map(\.range)
+    }
+
+    private static func makeSpan(
+        kind: ComposerMetadataSpan.Kind,
+        range: NSRange,
+        in text: String
+    ) -> ComposerMetadataSpan? {
+        guard let trimmedRange = trimmedRange(range, in: text),
+              let stringRange = Range(trimmedRange, in: text) else {
+            return nil
+        }
+        return ComposerMetadataSpan(
+            kind: kind,
+            range: trimmedRange,
+            sourceText: String(text[stringRange])
+        )
+    }
+
+    private static func trimmedRange(_ range: NSRange, in text: String) -> NSRange? {
+        guard let stringRange = Range(range, in: text) else { return nil }
+
+        var lowerBound = stringRange.lowerBound
+        var upperBound = stringRange.upperBound
+        while lowerBound < upperBound, text[lowerBound].isWhitespace {
+            lowerBound = text.index(after: lowerBound)
+        }
+        while lowerBound < upperBound {
+            let beforeUpperBound = text.index(before: upperBound)
+            guard text[beforeUpperBound].isWhitespace else { break }
+            upperBound = beforeUpperBound
+        }
+
+        guard lowerBound < upperBound else { return nil }
+        return NSRange(lowerBound..<upperBound, in: text)
+    }
+
+    /// Masks source ranges without changing their UTF-16 offsets.
+    private static func mask(_ text: String, ranges: [NSRange]) -> String {
+        let mutableText = NSMutableString(string: text)
+        for range in ranges.sorted(by: { $0.location > $1.location }) {
+            guard range.location != NSNotFound,
+                  range.location >= 0,
+                  NSMaxRange(range) <= mutableText.length else {
+                continue
+            }
+            mutableText.replaceCharacters(
+                in: range,
+                with: String(repeating: " ", count: range.length)
+            )
+        }
+        return String(mutableText)
+    }
+
+    private static func nonOverlappingSpans(
+        _ spans: [ComposerMetadataSpan]
+    ) -> [ComposerMetadataSpan] {
+        let priority: [ComposerMetadataSpan.Kind: Int] = [
+            .event: 0,
+            .dueDate: 1,
+            .duration: 2,
+            .recurrence: 3,
+            .project: 4
+        ]
+        let ordered = spans.sorted {
+            if $0.location != $1.location { return $0.location < $1.location }
+            if $0.length != $1.length { return $0.length > $1.length }
+            return (priority[$0.kind] ?? Int.max) < (priority[$1.kind] ?? Int.max)
+        }
+
+        var accepted: [ComposerMetadataSpan] = []
+        for span in ordered {
+            guard let previous = accepted.last,
+                  span.location < NSMaxRange(previous.range) else {
+                accepted.append(span)
+                continue
+            }
+            if (priority[span.kind] ?? Int.max) < (priority[previous.kind] ?? Int.max) {
+                accepted[accepted.count - 1] = span
+            }
+        }
+        return accepted.sorted { $0.location < $1.location }
+    }
+
+    private static func tokenSequenceRange(for phrase: String, in text: String) -> NSRange? {
+        let phraseWords = normalizedWordRanges(in: phrase).map(\.word)
+        let textWords = normalizedWordRanges(in: text)
+        guard !phraseWords.isEmpty, phraseWords.count <= textWords.count else { return nil }
+
+        for startIndex in 0...(textWords.count - phraseWords.count) {
+            let endIndex = startIndex + phraseWords.count
+            guard textWords[startIndex..<endIndex].map(\.word) == phraseWords else { continue }
+            let firstRange = textWords[startIndex].range
+            let lastRange = textWords[endIndex - 1].range
+            return NSRange(
+                location: firstRange.location,
+                length: NSMaxRange(lastRange) - firstRange.location
+            )
+        }
+        return nil
+    }
+
+    private static func normalizedWordRanges(
+        in text: String
+    ) -> [(word: String, range: NSRange)] {
+        var words: [(word: String, range: NSRange)] = []
+        var wordStart: String.Index?
+
+        func appendWord(through end: String.Index, to text: String) {
+            guard let wordStart, wordStart < end else { return }
+            let range = NSRange(wordStart..<end, in: text)
+            words.append((String(text[wordStart..<end]).lowercased(), range))
+        }
+
+        for index in text.indices {
+            let isWordCharacter = text[index].unicodeScalars.allSatisfy {
+                CharacterSet.alphanumerics.contains($0)
+            }
+            if isWordCharacter {
+                wordStart = wordStart ?? index
+            } else if wordStart != nil {
+                appendWord(through: index, to: text)
+                wordStart = nil
+            }
+        }
+        if wordStart != nil {
+            appendWord(through: text.endIndex, to: text)
+        }
+        return words
+    }
+
     static func parseForComposer(text: String, projectNames: [String]) -> ComposerResult {
         let candidates = projectNames.map { ProjectCandidate(name: $0) }
         return parseForComposer(text: text, projectCandidates: candidates)
@@ -228,7 +543,12 @@ struct SmartInputParser {
             date: core.date,
             dateHasExplicitTime: core.dateHasExplicitTime,
             recurrenceInterval: core.recurrenceInterval,
-            entryType: core.entryType
+            entryType: core.entryType,
+            metadataSpans: deterministicMetadataSpans(
+                in: text,
+                projectCandidates: projectCandidates,
+                result: core
+            )
         )
     }
 

@@ -187,12 +187,13 @@ class CalendarManager: ObservableObject {
             return
         }
         
-        // Keep a 4-day rolling window (yesterday + today + tomorrow + next day)
-        // so UI transitions around midnight do not drop upcoming events.
+        // Keep the previous day plus the full seven-day planning horizon so
+        // forecast capacity can subtract future calendar commitments without
+        // changing the existing highlight selection behavior.
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: anchorDate)
         let rangeStart = calendar.date(byAdding: .day, value: -1, to: startOfDay) ?? startOfDay
-        let rangeEnd = calendar.date(byAdding: .day, value: 3, to: startOfDay) ?? startOfDay
+        let rangeEnd = calendar.date(byAdding: .day, value: 7, to: startOfDay) ?? startOfDay
         
         let predicate = store.predicateForEvents(withStart: rangeStart, end: rangeEnd, calendars: calendars)
         
