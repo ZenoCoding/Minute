@@ -6,9 +6,33 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		C10000000000000000000021 /* MinuteDataModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000003 /* MinuteDataModel.swift */; };
+		C10000000000000000000022 /* MinuteDataService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000004 /* MinuteDataService.swift */; };
+		C10000000000000000000023 /* SmartInputParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000005 /* SmartInputParser.swift */; };
+		C10000000000000000000027 /* DueDateSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000007 /* DueDateSupport.swift */; };
+		C10000000000000000000024 /* MinuteWidgetSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000006 /* MinuteWidgetSnapshot.swift */; };
+		C10000000000000000000025 /* MinuteWidgetSnapshot.swift in Widget Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000006 /* MinuteWidgetSnapshot.swift */; };
+		C10000000000000000000028 /* MinuteWidgetSnapshot.swift in Minute Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000006 /* MinuteWidgetSnapshot.swift */; };
+		C10000000000000000000029 /* MinuteWidgetSnapshotBuilder.swift in Minute Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000008 /* MinuteWidgetSnapshotBuilder.swift */; };
+		C1000000000000000000002A /* MinuteModelContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000009 /* MinuteModelContainer.swift */; };
+		C1000000000000000000002B /* MinuteNotificationScheduling.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1000000000000000000000A /* MinuteNotificationScheduling.swift */; };
+		C10000000000000000000026 /* MinuteWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = C10000000000000000000002 /* MinuteWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		7B5A08782F08554900FA9623 /* Minute.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Minute.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B10000000000000000000001 /* MinuteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MinuteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C10000000000000000000001 /* Minute iOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Minute iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		C10000000000000000000002 /* MinuteWidget.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = MinuteWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		C10000000000000000000003 /* MinuteDataModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Minute/MinuteDataModel.swift; sourceTree = "<group>"; };
+		C10000000000000000000004 /* MinuteDataService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Minute/MinuteDataService.swift; sourceTree = "<group>"; };
+		C10000000000000000000005 /* SmartInputParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Minute/SmartInputParser.swift; sourceTree = "<group>"; };
+		C10000000000000000000007 /* DueDateSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Minute/DueDateSupport.swift; sourceTree = "<group>"; };
+		C10000000000000000000006 /* MinuteWidgetSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinuteWidgetSnapshot.swift; sourceTree = "<group>"; };
+		C10000000000000000000008 /* MinuteWidgetSnapshotBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinuteIOS/MinuteWidgetSnapshotBuilder.swift; sourceTree = "<group>"; };
+		C10000000000000000000009 /* MinuteModelContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Minute/MinuteModelContainer.swift; sourceTree = "<group>"; };
+		C1000000000000000000000A /* MinuteNotificationScheduling.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Minute/MinuteNotificationScheduling.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -20,6 +44,16 @@
 		B10000000000000000000002 /* MinuteTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = MinuteTests;
+			sourceTree = "<group>";
+		};
+		C10000000000000000000010 /* MinuteIOS */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MinuteIOS;
+			sourceTree = "<group>";
+		};
+		C10000000000000000000011 /* MinuteWidget */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MinuteWidget;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -39,6 +73,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C10000000000000000000034 /* iOS Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C10000000000000000000037 /* Widget Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -47,8 +95,26 @@
 			children = (
 				7B5A087A2F08554900FA9623 /* Minute */,
 				B10000000000000000000002 /* MinuteTests */,
+				C10000000000000000000010 /* MinuteIOS */,
+				C10000000000000000000011 /* MinuteWidget */,
+				C10000000000000000000012 /* MinuteWidgetShared */,
+				C10000000000000000000003 /* MinuteDataModel.swift */,
+				C10000000000000000000004 /* MinuteDataService.swift */,
+				C10000000000000000000005 /* SmartInputParser.swift */,
+				C10000000000000000000007 /* DueDateSupport.swift */,
+				C10000000000000000000008 /* MinuteWidgetSnapshotBuilder.swift */,
+				C10000000000000000000009 /* MinuteModelContainer.swift */,
+				C1000000000000000000000A /* MinuteNotificationScheduling.swift */,
 				7B5A08792F08554900FA9623 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		C10000000000000000000012 /* MinuteWidgetShared */ = {
+			isa = PBXGroup;
+			children = (
+				C10000000000000000000006 /* MinuteWidgetSnapshot.swift */,
+			);
+			path = MinuteWidgetShared;
 			sourceTree = "<group>";
 		};
 		7B5A08792F08554900FA9623 /* Products */ = {
@@ -56,11 +122,23 @@
 			children = (
 				7B5A08782F08554900FA9623 /* Minute.app */,
 				B10000000000000000000001 /* MinuteTests.xctest */,
+				C10000000000000000000001 /* Minute iOS.app */,
+				C10000000000000000000002 /* MinuteWidget.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
+
+/* Begin PBXContainerItemProxy section */
+		C10000000000000000000030 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7B5A08702F08554900FA9623 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C10000000000000000000041;
+			remoteInfo = MinuteWidget;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXContainerItemProxy section */
 		B10000000000000000000004 /* PBXContainerItemProxy */ = {
@@ -77,6 +155,11 @@
 			isa = PBXTargetDependency;
 			target = 7B5A08772F08554900FA9623 /* Minute */;
 			targetProxy = B10000000000000000000004 /* PBXContainerItemProxy */;
+		};
+		C10000000000000000000031 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C10000000000000000000041 /* MinuteWidget */;
+			targetProxy = C10000000000000000000030 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -124,6 +207,52 @@
 			productReference = B10000000000000000000001 /* MinuteTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		C10000000000000000000040 /* Minute iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C10000000000000000000050 /* Build configuration list for PBXNativeTarget "Minute iOS" */;
+			buildPhases = (
+				C10000000000000000000033 /* iOS Sources */,
+				C10000000000000000000034 /* iOS Frameworks */,
+				C10000000000000000000035 /* iOS Resources */,
+				C10000000000000000000032 /* Embed App Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C10000000000000000000031 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				C10000000000000000000010 /* MinuteIOS */,
+			);
+			name = "Minute iOS";
+			packageProductDependencies = (
+			);
+			productName = "Minute iOS";
+			productReference = C10000000000000000000001 /* Minute iOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+		C10000000000000000000041 /* MinuteWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C10000000000000000000051 /* Build configuration list for PBXNativeTarget "MinuteWidget" */;
+			buildPhases = (
+				C10000000000000000000036 /* Widget Sources */,
+				C10000000000000000000037 /* Widget Frameworks */,
+				C10000000000000000000038 /* Widget Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				C10000000000000000000011 /* MinuteWidget */,
+			);
+			name = MinuteWidget;
+			packageProductDependencies = (
+			);
+			productName = MinuteWidget;
+			productReference = C10000000000000000000002 /* MinuteWidget.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -133,11 +262,17 @@
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2620;
 				LastUpgradeCheck = 2620;
-				TargetAttributes = {
-					7B5A08772F08554900FA9623 = {
-						CreatedOnToolsVersion = 26.2;
-					};
+			TargetAttributes = {
+				7B5A08772F08554900FA9623 = {
+					CreatedOnToolsVersion = 26.2;
 				};
+				C10000000000000000000040 = {
+					CreatedOnToolsVersion = 26.2;
+				};
+				C10000000000000000000041 = {
+					CreatedOnToolsVersion = 26.2;
+				};
+			};
 			};
 			buildConfigurationList = 7B5A08732F08554900FA9623 /* Build configuration list for PBXProject "Minute" */;
 			developmentRegion = en;
@@ -155,6 +290,8 @@
 			targets = (
 				7B5A08772F08554900FA9623 /* Minute */,
 				B10000000000000000000006 /* MinuteTests */,
+				C10000000000000000000040 /* Minute iOS */,
+				C10000000000000000000041 /* MinuteWidget */,
 			);
 		};
 /* End PBXProject section */
@@ -174,6 +311,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C10000000000000000000035 /* iOS Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C10000000000000000000038 /* Widget Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -181,6 +332,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C10000000000000000000028 /* MinuteWidgetSnapshot.swift in Minute Sources */,
+				C10000000000000000000029 /* MinuteWidgetSnapshotBuilder.swift in Minute Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -191,7 +344,43 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C10000000000000000000033 /* iOS Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C10000000000000000000021 /* MinuteDataModel.swift in Sources */,
+				C10000000000000000000022 /* MinuteDataService.swift in Sources */,
+				C10000000000000000000023 /* SmartInputParser.swift in Sources */,
+				C10000000000000000000027 /* DueDateSupport.swift in Sources */,
+				C10000000000000000000024 /* MinuteWidgetSnapshot.swift in Sources */,
+				C1000000000000000000002A /* MinuteModelContainer.swift in Sources */,
+				C1000000000000000000002B /* MinuteNotificationScheduling.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C10000000000000000000036 /* Widget Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C10000000000000000000025 /* MinuteWidgetSnapshot.swift in Widget Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		C10000000000000000000032 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				C10000000000000000000026 /* MinuteWidget.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
 		7B5A08812F08554A00FA9623 /* Debug */ = {
@@ -317,6 +506,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Minute/Minute.entitlements;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
@@ -360,6 +550,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Minute/Minute.entitlements;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
@@ -435,6 +626,100 @@
 			};
 			name = Release;
 		};
+		C10000000000000000000052 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = MinuteIOS/MinuteIOS.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = RSNC24Q9XR;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MinuteIOSInfo.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tychoyoung.Minute.iOS;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C10000000000000000000053 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = MinuteIOS/MinuteIOS.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = RSNC24Q9XR;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MinuteIOSInfo.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tychoyoung.Minute.iOS;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		C10000000000000000000054 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = MinuteWidget/MinuteWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = RSNC24Q9XR;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MinuteWidgetInfo.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tychoyoung.Minute.iOS.Widget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C10000000000000000000055 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = MinuteWidget/MinuteWidget.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = RSNC24Q9XR;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MinuteWidgetInfo.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.tychoyoung.Minute.iOS.Widget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -461,6 +746,24 @@
 			buildConfigurations = (
 				B1000000000000000000000A /* Debug */,
 				B1000000000000000000000B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C10000000000000000000050 /* Build configuration list for PBXNativeTarget "Minute iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C10000000000000000000052 /* Debug */,
+				C10000000000000000000053 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C10000000000000000000051 /* Build configuration list for PBXNativeTarget "MinuteWidget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C10000000000000000000054 /* Debug */,
+				C10000000000000000000055 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
